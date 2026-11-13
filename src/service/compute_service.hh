@@ -4,6 +4,7 @@
 #include <chrono>
 #include <limits>
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 #include <thread>
@@ -36,6 +37,9 @@ public:
     u64 completed_items{};
     u64 completed_rpc_wall_ns{};
     u64 max_rpc_wall_ns{};
+    u64 repair_deadline_blocks{};
+    u64 repair_deadline_misses{};
+    u64 repair_max_delay_ns{};
   };
 
   struct InsertItem {
@@ -90,6 +94,19 @@ public:
       std::memory_order_relaxed);
   }
   StorageOwnerSenderTelemetry storage_owner_sender_telemetry() const {
+    u64 repair_deadline_blocks = 0;
+    u64 repair_deadline_misses = 0;
+    u64 repair_max_delay_ns = 0;
+    for (const auto& state : storage_insert_owners_) {
+      if (!state) continue;
+      repair_deadline_blocks += state->repair_deadline_blocks.load(
+        std::memory_order_relaxed);
+      repair_deadline_misses += state->repair_deadline_misses.load(
+        std::memory_order_relaxed);
+      repair_max_delay_ns = std::max(
+        repair_max_delay_ns,
+        state->repair_max_delay_ns.load(std::memory_order_relaxed));
+    }
     return {
       .submitted_batches = storage_owner_submitted_batches_.load(
         std::memory_order_relaxed),
@@ -103,6 +120,9 @@ public:
         std::memory_order_relaxed),
       .max_rpc_wall_ns = storage_owner_max_rpc_wall_ns_.load(
         std::memory_order_relaxed),
+      .repair_deadline_blocks = repair_deadline_blocks,
+      .repair_deadline_misses = repair_deadline_misses,
+      .repair_max_delay_ns = repair_max_delay_ns,
     };
   }
 
@@ -209,12 +229,16 @@ private:
     u64 busy_batches{};
     u64 busy_items{};
     u32 max_consecutive_busy_batches{};
-    // Early flow-control pacing applied by the progress thread. Delays are
-    // armed through retry_not_before_ns after a batch is posted; they never
-    // block CQ progress and never drop or reorder queued work.
-    u64 flow_control_throttled_batches{};
-    u64 flow_control_delay_ns_total{};
-    u64 flow_control_max_backlog{};
+    std::atomic<u64> repair_deadline_blocks{0};
+    std::atomic<u64> repair_deadline_misses{0};
+    std::atomic<u64> repair_max_delay_ns{0};
+  };
+
+  struct StorageOwnerRepairTiming {
+    std::map<u64, std::chrono::steady_clock::time_point> completion_times;
+    u64 rate_sequence{};
+    std::chrono::steady_clock::time_point rate_started{};
+    double durable_rate_per_sec{};
   };
 
   struct StorageOwnerReadySlot {
@@ -298,6 +322,7 @@ private:
   std::unique_ptr<bounded::CompletionPool> storage_completion_pool_;
   std::unique_ptr<service::breakdown::Sample[]> storage_completion_samples_;
   std::unique_ptr<std::atomic<u64>[]> storage_maintenance_targets_;
+  std::unique_ptr<StorageOwnerRepairTiming[]> storage_repair_timing_;
   vec<std::unique_ptr<StorageOwnerSenderState>> storage_insert_owners_;
   // Per-shard Stage2 watermarks refreshed by the flow-control poll thread
   // through the query engine's control-block read path. The sender reads only

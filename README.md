@@ -11,8 +11,9 @@ DVSTOR 是面向动态向量检索的存算分离系统。存储节点维护 Vam
 | `decoupled` | Persistent | GPU 常驻查询状态，通过 DOCA GPUNetIO 读取远端记录，并提前发起下一轮图读取 |
 | `manual` | Persistent | 用于单独控制提前读取、批量宽度等实验参数 |
 
-正式 baseline/full profile 分别使用前两种模式；动机和消融脚本会覆盖部分模式，具体见
-[实验说明](experiment/README.md)。HostOrchestrated 是显式选择的后端，运行失败不会触发引擎切换。
+正式 baseline/full 都保留 Persistent GPU、GPUNetIO 和 Storage Owner。baseline 用 `manual`
+关闭提前推进等研究机制，full 用 `decoupled`；配置和运行方法见
+[SIFT100M 实验说明](experiment/sift100m/README.md)。HostOrchestrated 是显式选择的后端，运行失败不会触发引擎切换。
 
 ## 构建
 
@@ -27,6 +28,19 @@ cmake -S . -B build-compute -DCMAKE_BUILD_TYPE=Release
 cmake --build build-compute -j16
 ```
 
+Persistent GPUNetIO 的最低架构为 SM70。V100 使用仍支持 Volta 的 CUDA 12.x，并显式
+构建 SM70 产物；SM70 使用等价的 shuffle warp 归约，SM80+ 保留原生归约指令：
+
+```bash
+cmake -S . -B build-v100 -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_ARCHITECTURES=70
+cmake --build build-v100 -j16
+```
+
+V100 兼容构建不降低 GPUNetIO 的硬件要求：DOCA 版本、ConnectX 网卡、GPUDirect RDMA
+和 GPU doorbell 仍须受支持，并通过启动时的 RDMA read probe。显存容量和每 SM 常驻 CTA
+数量按实际设备检查，不沿用 A800 的吞吐或 occupancy 假设。
+
 无 GPU 的存储/索引构建节点：
 
 ```bash
@@ -36,6 +50,8 @@ cmake --build build-storage -j16
 ```
 
 仅运行存储服务时，可再设置 `-DDVSTOR_BUILD_OFFLINE_TOOLS=OFF`，无需安装 Faiss、CUDA 或 DOCA。
+若 Conda 的 TBB 引入了另一套 Boost 头文件，在配置命令中同时指定
+`-DBOOST_ROOT="$CONDA_PREFIX" -DBoost_NO_SYSTEM_PATHS=ON`，保证 Boost 头文件与链接库来自同一安装。
 计算和存储构建使用各自的目录；实验脚本通过 `BUILD_DIR`、`STORAGE_BUILD_DIR` 选择对应产物。
 
 `DVSTOR_METIS_PARTITION=AUTO` 会检查 METIS/GKlib 的实际链接兼容性，并尝试回退到系统库。
@@ -74,17 +90,24 @@ cmake --build build-storage -j16
 PQ 数据；HostOrchestrated 每次读取动态 PQ 到主机 scratch，再复制到对应 CUDA lane。
 权威状态均由存储节点持有。
 
-首次运行先按数据集说明准备数据和索引，再启动实验入口。以 SIFT100M 为例：
+首次运行需要准备匹配的数据和索引。当前四片 SIFT100M 实验的数据路径、节点地址、构建和
+运行方法集中在 [SIFT100M 实验说明](experiment/sift100m/README.md)。运行器会校验索引、
+输入和配置，在每个 case 前检查 GPU/MN 状态，并保存完整命令、日志和报告。
+公共参数位于 `experiment/sift100m/common.conf`，`baseline.conf` 与 `full.conf` 只覆盖研究开关；
+运行器会在输出目录保存合成后的完整配置。
 
-```bash
-BUILD_DIR="$PWD/build-storage" ./experiment/sift100m/build_sift100m_index.sh
-BUILD_DIR="$PWD/build-compute" ./experiment/sift100m/program1/run_program1.sh
-```
+## 源码导航
 
-实验脚本在每个 case 前打印存储节点命令并等待就绪。数据路径、节点地址和运行参数需按机器
-配置，详见 [SIFT100M](experiment/sift100m/README.md)、[Deep100M](experiment/deep100m/README.md)
-和 [SPACEV100M](experiment/spacev100m/README.md)。三者均提供 Program 1–3；SIFT 另有累积消融，
-跨数据集混合负载见 [mixed_test](experiment/mixed_test/README.md)。
+- `src/gpu_search/persistent_kernel/`：Persistent 查询状态机、Stable-Run、精确前沿证书、
+  GPUNetIO transport、图 extent 与 ROB I/O。`query_traversal.cuh` 是主状态机，其余文件按
+  评分、证书、frontier 和记录类型拆分。
+- `src/memory_node/peer_rpc/`：Stage1 与 Stage2 RPC handler。
+- `src/memory_node/storage_owner_index/`：局部搜索、同步/异步 continuation、图快照与发布。
+- `src/memory_node/storage_owner_maintenance/`：维护队列与 `Stage2Worker`；
+  `worker_search.cc`、`worker_reconcile.cc`、`worker_prepare.cc`、`worker_finalize.cc`
+  分别负责搜索、反向协调、图准备和收尾。
+- `src/common/configuration.hh/.cc`：配置字段、解析与校验。
+- `experiment/common/`：实验配置合成与报告公共逻辑；集群专用编排仍留在各实验目录。
 
 ## 验证与开发
 
@@ -96,7 +119,5 @@ ctest --test-dir build-compute --output-on-failure
 本地测试覆盖格式、PQ、路由、更新协议、内存预算与查询策略。吞吐、召回率和 GPU/RDMA
 运行情况需要在实际存储节点和计算节点上验证，测试通过不能代替硬件实验。
 
-- [源码结构](docs/source_layout.md)：模块职责和修改边界。
-- [查询与动态更新](docs/gpu_persistent_engine.md)：执行流程、路由、一致性和故障处理。
-- [Live-Extent RDMA](docs/live_extent_rdma.md)：读取长度、回退和统计口径。
-- [实验说明](experiment/README.md)：数据准备、Program 1–3 和结果复用。
+- [论文实现系统](doc/paper_system.md)：背景、动机、三项研究内容、一致性和证据边界。
+- [SIFT100M 实验说明](experiment/sift100m/README.md)：baseline/full 配置、集群同步和性能验证。

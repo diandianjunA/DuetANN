@@ -1,6 +1,8 @@
 #include "service/compute_service/detail.hh"
 #include "service/compute_service/storage_owner/batch_policy.hh"
 
+#include <cstdlib>
+
 using namespace compute_service_detail;
 
 void ComputeService::handle_storage_owner_send_completion(
@@ -159,6 +161,16 @@ void ComputeService::handle_storage_owner_token_completion(
     throw std::runtime_error("storage-owner completion references invalid task");
   }
   auto& task = state.tasks[task_id];
+  if (service::storage_owner::mutation_completion_trace_enabled()) {
+    std::cerr << "[mutation-trace] receive owner=" << owner_storage
+              << " task=" << task_id
+              << " operation_id=" << completion.operation_id
+              << " task_operation_id=" << task.operation_id
+              << " task_generation=" << task.operation_generation
+              << " generation=" << generation
+              << " completion_id=" << task.completion_id
+              << " status=" << completion.status << std::endl;
+  }
   if (task.operation_id != completion.operation_id ||
       task.operation_generation != generation ||
       task.completion_id == std::numeric_limits<u32>::max()) {
@@ -206,6 +218,10 @@ void ComputeService::handle_storage_owner_token_completion(
              !target.compare_exchange_weak(
                observed, completion.maintenance_sequence,
                std::memory_order_release, std::memory_order_relaxed)) {
+      }
+      if (config_.storage_owner_repair_deadline_ms != 0) {
+        storage_repair_timing_[maintenance_home.memory_node()].completion_times[
+          completion.maintenance_sequence] = std::chrono::steady_clock::now();
       }
     }
   }

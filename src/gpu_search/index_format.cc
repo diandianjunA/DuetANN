@@ -674,16 +674,16 @@ bool write_code_header(std::ostream& output, const CodeHeader& source,
 }
 
 u32 graph_extent_class(u32 live_neighbors) {
-  return live_neighbors / kGraphExtentQuantum +
-    (live_neighbors % kGraphExtentQuantum != 0 ? 1u : 0u);
+  return vamana::graph_extent::level_for_neighbors(
+    live_neighbors, std::numeric_limits<u32>::max());
 }
 
 u32 graph_extent_read_bytes(u32 extent_class, u32 graph_entry_bytes) {
-  constexpr u64 header_bytes = vamana::hot_graph::kTaggedNeighborBaseOffset;
-  const u64 requested = header_bytes +
-    static_cast<u64>(extent_class) * kGraphExtentQuantum *
-      kCompactPointerBytes;
-  return static_cast<u32>(std::min<u64>(requested, graph_entry_bytes));
+  const u32 capacity =
+    (graph_entry_bytes - vamana::graph_extent::kHeaderBytes) /
+      vamana::graph_extent::kPointerBytes;
+  return vamana::graph_extent::bytes_for_level(
+    static_cast<u8>(extent_class), graph_entry_bytes, capacity);
 }
 
 bool validate_graph_extent_header(

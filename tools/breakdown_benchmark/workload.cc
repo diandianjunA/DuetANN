@@ -141,6 +141,13 @@ void preflight_workload_inputs(
     if (args.mixed_delete_mode == "inserted" && checked_start < config.max_vectors) {
       throw std::runtime_error("steady-state inserts must not reuse base IDs");
     }
+    if (args.hotspot_id_count != 0) {
+      if (args.mixed_delete_mode != "inserted") {
+        throw std::runtime_error("hotspot IDs require --mixed-delete-mode inserted");
+      }
+      (void)checked_advance_insert_id(
+        checked_start, args.hotspot_id_count, config.vector_id_namespace_size);
+    }
     if (args.seed_insert_count != 0) {
       (void)checked_advance_insert_id(
         checked_start, args.seed_insert_count, config.vector_id_namespace_size);
@@ -152,9 +159,19 @@ void preflight_workload_inputs(
       if (fixed_ops > std::numeric_limits<u64>::max() - 1024) {
         throw std::overflow_error("fixed insert operation range overflows");
       }
+      u64 insert_id_span = fixed_ops + 1024;
+      if (args.mixed_mode == "single_reader") {
+        if (fixed_ops > std::numeric_limits<u64>::max() /
+              args.single_reader_write_cycles_per_query) {
+          throw std::overflow_error("single-reader ID range overflows");
+        }
+        insert_id_span = checked_query_row_sum(
+          args.seed_insert_count,
+          fixed_ops * args.single_reader_write_cycles_per_query);
+        insert_id_span = checked_query_row_sum(insert_id_span, 1024);
+      }
       (void)checked_advance_insert_id(
-        checked_start, fixed_ops + 1024,
-        config.vector_id_namespace_size);
+        checked_start, insert_id_span, config.vector_id_namespace_size);
     }
   }
   if (!args.insert_file.empty()) {
@@ -328,7 +345,9 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     {"run_mode", (args.warmup_seconds > 0 || args.measure_seconds > 0) ? "time" : "ops"},
     {"recall_only", args.recall_only},
     {"time_completion_policy", "drain"},
-    {"time_issue_policy", args.mixed_mode == "fixed_threads"
+    {"time_issue_policy", args.mixed_mode == "single_reader"
+       ? "single_query_thread_plus_deterministic_sliding_writers"
+       : args.mixed_mode == "fixed_threads"
        ? "fixed_read_write_threads_until_deadline"
        : (shared_rate_limited
             ? "shared_two_stream_pacer_until_deadline"
@@ -375,11 +394,12 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     {"entry_seed_capacity", gpu_search::kCentroidRouteMaxLiveEntries},
     {"gpu_query_slots", service.config().gpu_query_slots},
     {"gpu_rdma_qps", service.config().gpu_rdma_qps},
-    {"gpu_graph_prefetch_depth", service.config().gpu_graph_prefetch_depth},
     {"gpu_graph_commit_width", service.config().gpu_graph_commit_width},
     {"gpu_graph_issue_width", service.config().gpu_graph_issue_width},
     {"gpu_exact_frontier_early_issue",
       service.config().gpu_exact_frontier_early_issue},
+    {"gpu_terminal_exact_prefetch",
+      service.config().gpu_terminal_exact_prefetch},
     {"gpu_frontier_execution_mode",
       service.config().decoupled_gpu_rdma_search_progression_enabled()
         ? (service.config().gpu_graph_issue_width >
@@ -425,6 +445,14 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
   size_t fixed_read_threads = 0;
   size_t fixed_write_threads = 0;
   size_t fixed_insert_threads = 0;
+  if (args.workload == "mixed" && args.mixed_mode == "single_reader") {
+    root["meta"]["mixed_fixed_threads"] = {
+      {"read_threads", 1},
+      {"write_threads", args.client_threads - 1},
+    };
+    root["meta"]["single_reader_write_cycles_per_query"] =
+      args.single_reader_write_cycles_per_query;
+  }
   if (args.workload == "mixed" &&
       (args.mixed_mode == "fixed_threads" || write_rate_limited)) {
     if (write_rate_limited) {
@@ -942,6 +970,30 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     return dist(rng);
   };
 
+  DynamicIdPool hotspot_free_ids(args.dynamic_state_file);
+  const uint32_t hotspot_first_id = args.insert_start_id == 0
+    ? static_cast<uint32_t>(service.config().max_vectors + 10000)
+    : args.insert_start_id;
+  const uint64_t hotspot_end_id =
+    static_cast<uint64_t>(hotspot_first_id) + args.hotspot_id_count;
+  std::vector<uint32_t> single_reader_live_ids(args.hotspot_id_count);
+  for (size_t index = 0; index < single_reader_live_ids.size(); ++index) {
+    single_reader_live_ids[index] = checked_insert_id(
+      static_cast<u64>(hotspot_first_id) + index,
+      service.config().vector_id_namespace_size);
+  }
+  const auto claim_hotspot_insert_id = [&](std::atomic<uint32_t>& next_id,
+                                           std::chrono::steady_clock::time_point deadline)
+      -> std::optional<uint32_t> {
+    if (args.hotspot_id_count == 0) {
+      return claim_insert_id(next_id, service.config().vector_id_namespace_size);
+    }
+    if (next_id.load(std::memory_order_relaxed) < hotspot_end_id) {
+      return claim_insert_id(next_id, service.config().vector_id_namespace_size);
+    }
+    return hotspot_free_ids.pop(deadline);
+  };
+
   auto issue_mixed_write = [&](std::mt19937_64& rng,
                                WriteKind kind,
                                std::atomic<uint32_t>& next_insert_id,
@@ -956,8 +1008,9 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     switch (kind) {
       case WriteKind::insert: {
         issued_inserts.fetch_add(1, std::memory_order_relaxed);
-        const uint32_t id = claim_insert_id(
-          next_insert_id, service.config().vector_id_namespace_size);
+        const auto claimed = claim_hotspot_insert_id(next_insert_id, deadline);
+        if (!claimed.has_value()) return false;
+        const uint32_t id = *claimed;
         vec<element_t> values = get_insert_vector(id);
         vec<ComputeService::InsertItem> items;
         items.push_back({id, std::move(values)});
@@ -985,8 +1038,10 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
           const auto claimed = dynamic_ids.pop(deadline);
           if (!claimed.has_value()) {
             issued_inserts.fetch_add(1, std::memory_order_relaxed);
-            const uint32_t insert_id = claim_insert_id(
-              next_insert_id, service.config().vector_id_namespace_size);
+            const auto insert_claim = claim_hotspot_insert_id(
+              next_insert_id, deadline);
+            if (!insert_claim.has_value()) return false;
+            const uint32_t insert_id = *insert_claim;
             vec<element_t> values = get_insert_vector(insert_id);
             vec<ComputeService::InsertItem> items;
             items.push_back({insert_id, std::move(values)});
@@ -1005,14 +1060,149 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
         vec<node_t> ids;
         ids.push_back(id);
         const bool succeeded = service.erase(ids) == 1;
-        if (succeeded) completed_deletes.fetch_add(1, std::memory_order_relaxed);
+        if (succeeded) {
+          if (args.hotspot_id_count != 0) hotspot_free_ids.push(id);
+          completed_deletes.fetch_add(1, std::memory_order_relaxed);
+        }
         return succeeded;
       }
     }
     return false;
   };
 
+  auto run_single_reader_phase_ops = [&](const std::string& label, size_t ops,
+                                         uint32_t start_id) -> MixedPhaseStats {
+    if (ops > std::numeric_limits<size_t>::max() /
+          args.single_reader_write_cycles_per_query) {
+      throw std::overflow_error("single-reader write cycle count overflows");
+    }
+    const size_t writer_count = args.client_threads - 1;
+    const size_t write_cycles_per_query = label.starts_with("warmup-")
+      ? 0 : args.single_reader_write_cycles_per_query;
+    const size_t total_write_cycles = ops * write_cycles_per_query;
+    const size_t hotspot_slots_per_writer =
+      (args.hotspot_id_count + writer_count - 1) / writer_count;
+    std::atomic<size_t> completed_ops{0};
+    std::atomic<size_t> issued_reads{0};
+    std::atomic<size_t> issued_writes{0};
+    std::atomic<size_t> issued_inserts{0};
+    std::atomic<size_t> issued_upserts{0};
+    std::atomic<size_t> issued_deletes{0};
+    std::atomic<size_t> completed_reads{0};
+    std::atomic<size_t> completed_writes{0};
+    std::atomic<size_t> completed_inserts{0};
+    std::atomic<size_t> completed_upserts{0};
+    std::atomic<size_t> completed_deletes{0};
+    std::atomic<bool> failed{false};
+    std::exception_ptr error;
+    std::mutex error_mutex;
+    std::barrier start_barrier(static_cast<std::ptrdiff_t>(args.client_threads));
+    std::vector<std::thread> threads;
+    threads.reserve(args.client_threads);
+    ProgressReporter reporter(
+      label, completed_ops, ops + 2 * total_write_cycles, 0,
+      &completed_reads, &completed_writes);
+    for (size_t tid = 0; tid < args.client_threads; ++tid) {
+      threads.emplace_back([&, tid]() {
+        start_barrier.arrive_and_wait();
+        try {
+          if (tid == 0) {
+            for (size_t query = 0; query < ops &&
+                 !failed.load(std::memory_order_acquire); ++query) {
+              const auto query_row = performance_query_stream.try_claim();
+              if (!query_row.has_value()) {
+                throw std::runtime_error("single-reader query file exhausted");
+              }
+              issued_reads.fetch_add(1, std::memory_order_relaxed);
+              (void)service.search_raw(
+                performance_query_rows.dtype,
+                performance_query_rows.raw_row(*query_row), dim,
+                service.config().k);
+              completed_reads.fetch_add(1, std::memory_order_relaxed);
+              completed_ops.fetch_add(1, std::memory_order_relaxed);
+            }
+            return;
+          }
+
+          const size_t writer = tid - 1;
+          const size_t hotspot_begin = writer * hotspot_slots_per_writer;
+          const size_t hotspot_end = std::min(
+            static_cast<size_t>(args.hotspot_id_count),
+            hotspot_begin + hotspot_slots_per_writer);
+          const size_t assigned_cycles = total_write_cycles / writer_count +
+            (writer < total_write_cycles % writer_count ? 1 : 0);
+          for (size_t cycle = 0; cycle < assigned_cycles &&
+               !failed.load(std::memory_order_acquire); ++cycle) {
+            const size_t hotspot_index = hotspot_begin +
+              (cycle % (hotspot_end - hotspot_begin));
+            const uint32_t previous_id = single_reader_live_ids[hotspot_index];
+            const uint32_t replacement_id = checked_insert_id(
+              static_cast<u64>(start_id) + writer * assigned_cycles + cycle,
+              service.config().vector_id_namespace_size);
+
+            issued_writes.fetch_add(1, std::memory_order_relaxed);
+            issued_inserts.fetch_add(1, std::memory_order_relaxed);
+            vec<element_t> values = get_insert_vector(
+              static_cast<uint32_t>(hotspot_first_id + hotspot_index));
+            vec<ComputeService::InsertItem> items;
+            items.push_back({replacement_id, std::move(values)});
+            if (service.insert(items) != 1) {
+              throw std::runtime_error("single-reader replacement insert was rejected");
+            }
+            completed_inserts.fetch_add(1, std::memory_order_relaxed);
+            completed_writes.fetch_add(1, std::memory_order_relaxed);
+            completed_ops.fetch_add(1, std::memory_order_relaxed);
+
+            issued_writes.fetch_add(1, std::memory_order_relaxed);
+            issued_deletes.fetch_add(1, std::memory_order_relaxed);
+            vec<node_t> ids{previous_id};
+            if (service.erase(ids) != 1) {
+              throw std::runtime_error("single-reader previous-ID erase was rejected");
+            }
+            completed_deletes.fetch_add(1, std::memory_order_relaxed);
+            completed_writes.fetch_add(1, std::memory_order_relaxed);
+            completed_ops.fetch_add(1, std::memory_order_relaxed);
+            single_reader_live_ids[hotspot_index] = replacement_id;
+            if (!dynamic_ids.replace(previous_id, replacement_id)) {
+              throw std::runtime_error("single-reader dynamic ID replacement failed");
+            }
+          }
+        } catch (...) {
+          {
+            std::lock_guard<std::mutex> lock(error_mutex);
+            if (error == nullptr) error = std::current_exception();
+          }
+          failed.store(true, std::memory_order_release);
+        }
+      });
+    }
+    for (auto& thread : threads) thread.join();
+    reporter.finish();
+    if (error != nullptr) std::rethrow_exception(error);
+    if (label.starts_with("measure-")) measure_windows = reporter.samples();
+    throw_if_performance_queries_exhausted(label);
+    return MixedPhaseStats{
+      .next_insert_id = checked_advance_insert_id(
+        start_id, total_write_cycles, service.config().vector_id_namespace_size),
+      .issued_reads = issued_reads.load(std::memory_order_relaxed),
+      .issued_writes = issued_writes.load(std::memory_order_relaxed),
+      .issued_inserts = issued_inserts.load(std::memory_order_relaxed),
+      .issued_upserts = issued_upserts.load(std::memory_order_relaxed),
+      .issued_deletes = issued_deletes.load(std::memory_order_relaxed),
+      .completed_reads = completed_reads.load(std::memory_order_relaxed),
+      .completed_writes = completed_writes.load(std::memory_order_relaxed),
+      .completed_inserts = completed_inserts.load(std::memory_order_relaxed),
+      .completed_upserts = completed_upserts.load(std::memory_order_relaxed),
+      .completed_deletes = completed_deletes.load(std::memory_order_relaxed),
+      .scheduled_reads = ops,
+      .scheduled_writes = 2 * total_write_cycles,
+    };
+  };
+
   auto run_mixed_phase_ops = [&](const std::string& label, size_t ops, uint32_t start_id) -> MixedPhaseStats {
+    if (args.mixed_mode == "single_reader") {
+      return run_single_reader_phase_ops(label, ops, start_id);
+    }
     std::atomic<size_t> completed_ops{0};
     std::atomic<uint32_t> next_insert_id{start_id};
     std::atomic<size_t> issued_reads{0};
@@ -1254,6 +1444,7 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     next_insert_id = static_cast<uint32_t>(default_start);
   }
   root["meta"]["effective_insert_start_id"] = next_insert_id;
+  root["meta"]["hotspot_id_count"] = args.hotspot_id_count;
   std::cerr << "[breakdown] effective insert start id=" << next_insert_id << std::endl;
   const bool use_time_mode = args.warmup_seconds > 0 || args.measure_seconds > 0;
   const bool workload_has_writes = !args.recall_only &&
@@ -1267,6 +1458,7 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
   double measure_query_client_drain_seconds = 0.0;
   double measure_write_client_drain_seconds = 0.0;
   double measure_maintenance_drain_seconds = 0.0;
+  double measure_maintenance_durable_drain_seconds = 0.0;
   bool measure_maintenance_complete = !workload_has_writes;
   vec<u64> maintenance_target_sequences;
   vec<u64> maintenance_durable_sequences;
@@ -1285,9 +1477,46 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     vec<u64> durable;
     const size_t timeout_ms = args.maintenance_timeout_ms == 0
       ? service.config().storage_owner_rpc_timeout_ms : args.maintenance_timeout_ms;
-    const bool complete = service.wait_for_storage_maintenance(
+    bool complete = service.wait_for_storage_maintenance(
       std::chrono::milliseconds(std::max<size_t>(1000, timeout_ms)),
       &targets, &durable);
+    if (std::string_view{phase} == "measure") {
+      measure_maintenance_durable_drain_seconds =
+        std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - started).count();
+    }
+    if (complete) {
+      const auto deadline = started + std::chrono::milliseconds(
+        std::max<size_t>(1000, timeout_ms));
+      const auto settled = [&]() {
+        const auto snapshots = service.storage_maintenance_telemetry();
+        bool telemetry_valid = !snapshots.empty();
+        for (const auto& snapshot : snapshots) {
+          if (!snapshot.has_value()) {
+            telemetry_valid = false;
+            break;
+          }
+          if (snapshot->remaining != 0 ||
+              snapshot->peer_reverse_remaining != 0 ||
+              snapshot->completion_incomplete != 0 ||
+              snapshot->certificate_leases_active != 0) {
+            return false;
+          }
+        }
+        if (telemetry_valid) return true;
+        if (args.storage_maintenance_logs.empty()) return false;
+        const auto summary = summarize_current_maintenance_logs(
+          args.storage_maintenance_logs);
+        return summary.readable_logs == args.storage_maintenance_logs.size() &&
+          summary.logs_with_observations == args.storage_maintenance_logs.size() &&
+          summary.remaining == 0 && summary.completion_incomplete == 0 &&
+          summary.certificate_leases_active == 0;
+      };
+      while (!settled() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      complete = settled();
+    }
     if (std::string_view{phase} == "measure") {
       measure_maintenance_complete = complete;
     }
@@ -1407,6 +1636,8 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     maintenance_log_cursors = snapshot_maintenance_logs(
       args.storage_maintenance_logs);
   }
+  const auto storage_owner_sender_before_measure =
+    service.storage_owner_sender_telemetry();
   service.reset_breakdown_state();
   std::cerr << "[breakdown] starting measure phase" << std::endl;
   size_t measured_query_operations = 0;
@@ -1625,6 +1856,11 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     {"late_rpc_completions", late_storage_owner_rpcs},
     {"late_rpc_threshold_ms", service.config().storage_owner_rpc_timeout_ms},
     {"maintenance_drain_seconds", measure_maintenance_drain_seconds},
+    {"maintenance_durable_drain_seconds",
+      measure_maintenance_durable_drain_seconds},
+    {"maintenance_observation_settle_seconds",
+      std::max(0.0, measure_maintenance_drain_seconds -
+        measure_maintenance_durable_drain_seconds)},
     {"maintenance_target_sequences", maintenance_target_sequences},
     {"maintenance_durable_sequences", maintenance_durable_sequences},
     {"submitted_batches", storage_owner_sender.submitted_batches},
@@ -1634,6 +1870,17 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     {"completed_rpc_wall_ns",
       storage_owner_sender.completed_rpc_wall_ns},
     {"max_rpc_wall_ns", storage_owner_sender.max_rpc_wall_ns},
+    {"repair_deadline_ms", service.config().storage_owner_repair_deadline_ms},
+    {"repair_deadline_blocks", storage_owner_sender.repair_deadline_blocks},
+    {"repair_deadline_misses", storage_owner_sender.repair_deadline_misses},
+    {"repair_max_delay_ms",
+      storage_owner_sender.repair_max_delay_ns / 1'000'000.0},
+    {"measure_repair_deadline_blocks",
+      storage_owner_sender.repair_deadline_blocks -
+        storage_owner_sender_before_measure.repair_deadline_blocks},
+    {"measure_repair_deadline_misses",
+      storage_owner_sender.repair_deadline_misses -
+        storage_owner_sender_before_measure.repair_deadline_misses},
     {"average_submitted_batch_size",
       storage_owner_sender.submitted_batches == 0 ? 0.0
       : static_cast<double>(storage_owner_sender.submitted_items) /
@@ -2263,6 +2510,28 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
            maintenance_summary.stage2_home_score_rpc_queries) /
          static_cast<double>(
            maintenance_summary.stage2_home_score_rpc_items)},
+    }},
+    {"split_plane", {
+      {"dispatch_unit", "plane_wave"},
+      {"score_home_wait_ns", maintenance_summary.stage2_score_home_wait_ns},
+      {"graph_home_wait_ns", maintenance_summary.stage2_graph_home_wait_ns},
+      {"score_home_dispatches",
+       maintenance_summary.stage2_score_home_dispatches},
+      {"graph_home_dispatches",
+       maintenance_summary.stage2_graph_home_dispatches},
+      {"dual_plane_dispatches",
+       maintenance_summary.stage2_dual_plane_dispatches},
+      {"dual_plane_waits", maintenance_summary.stage2_dual_plane_waits},
+      {"avg_score_home_wait_us",
+       maintenance_summary.stage2_score_home_dispatches == 0 ? 0.0 :
+         static_cast<double>(maintenance_summary.stage2_score_home_wait_ns) /
+         static_cast<double>(
+           maintenance_summary.stage2_score_home_dispatches) / 1e3},
+      {"avg_graph_home_wait_us",
+       maintenance_summary.stage2_graph_home_dispatches == 0 ? 0.0 :
+         static_cast<double>(maintenance_summary.stage2_graph_home_wait_ns) /
+         static_cast<double>(
+           maintenance_summary.stage2_graph_home_dispatches) / 1e3},
     }},
     {"timing_counter_delta_available",
      maintenance_summary.timing_counter_delta_available},

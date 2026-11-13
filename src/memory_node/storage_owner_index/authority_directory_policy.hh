@@ -433,6 +433,19 @@ inline AuthorityRelocateState relocate_authority_if_current(
        expected_placement_version == std::numeric_limits<u64>::max())) {
     return AuthorityRelocateState::conflict;
   }
+  // A no-op Stage2 barrier does not change the directory. Once its own
+  // operation has committed, a successor lease may coexist with that proof:
+  // the successor's dependency-aware cleanup still waits for this Stage2.
+  // Restrict the exception to the exact committed token and directory version;
+  // real relocations must continue to settle before a successor can begin.
+  if (expected == desired && state.exists && !state.entry.deleted &&
+      state.entry.generation == generation &&
+      state.entry.current == expected &&
+      state.entry.placement_version == expected_placement_version &&
+      same_authority_operation(
+        state.entry.last_committed_operation, operation)) {
+    return AuthorityRelocateState::committed;
+  }
   // Begin and relocate share one authority-shard mutex.  Consequently this is
   // the decisive race check: a successor that captured expected must settle
   // before an older Stage2 may change that physical pointer.
@@ -443,9 +456,9 @@ inline AuthorityRelocateState relocate_authority_if_current(
   }
 
   // expected == desired is a read-only authority barrier used by an armed
-  // Stage2 task. It proves that the foreground mutation has committed and
-  // that no successor lease is active, but must not consume (or conflict
-  // with) the operation's relocation replay receipt.
+  // Stage2 task. With no successor lease it proves foreground commitment and
+  // currency; the narrower committed-token case is handled above. Neither
+  // case consumes or conflicts with the operation's relocation replay receipt.
   if (expected == desired) {
     return state.entry.current == expected &&
         state.entry.placement_version == expected_placement_version

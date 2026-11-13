@@ -329,6 +329,21 @@ inline Stage1ControlResponseDisposition classify_stage1_control_item(
   return Stage1ControlResponseDisposition::resolved;
 }
 
+enum class CleanupActivationSnapshotDisposition : u8 {
+  live,
+  deleted,
+  not_found,
+  retry,
+};
+
+inline CleanupActivationSnapshotDisposition cleanup_activation_snapshot(
+    bool snapshot_read, bool identity_matches, bool deleted) noexcept {
+  if (!snapshot_read) return CleanupActivationSnapshotDisposition::retry;
+  if (!identity_matches) return CleanupActivationSnapshotDisposition::not_found;
+  return deleted ? CleanupActivationSnapshotDisposition::deleted
+                 : CleanupActivationSnapshotDisposition::live;
+}
+
 // Translate the receiver-local fused ARM attempt back into the enclosing
 // Execute result without turning an uncertain handoff into a semantic
 // rejection.  Once prepare has succeeded, an absent or malformed ARM result

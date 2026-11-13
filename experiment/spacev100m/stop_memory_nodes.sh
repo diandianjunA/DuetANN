@@ -1,1 +1,0 @@
-../common/stop_memory_nodes.sh

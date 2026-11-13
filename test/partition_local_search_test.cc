@@ -252,10 +252,12 @@ void test_transient_node_snapshot_is_retryable_not_terminal() {
            pointer, stable, stable, pointer.incarnation()) ==
          StableNodeSnapshotState::stable);
   const u64 provisional = stable | VamanaNode::HEADER_PROVISIONAL;
-  // Stage1 traversal uses the coherent physical identity and may therefore
-  // walk through a provisional node, while its final-beam validation uses the
-  // stable lifecycle policy and excludes the same node from the handoff.
+  // A pending identity is a valid co-refinement candidate, but it cannot be
+  // mistaken for a stable reachability certificate.
   assert(detail::classify_physical_node_snapshot(
+           pointer, provisional, provisional, pointer.incarnation()) ==
+         StableNodeSnapshotState::stable);
+  assert(detail::classify_construction_node_snapshot(
            pointer, provisional, provisional, pointer.incarnation()) ==
          StableNodeSnapshotState::stable);
   assert(detail::classify_stable_node_snapshot(
@@ -394,8 +396,8 @@ void test_nan_distances_are_canonicalized_to_positive_infinity() {
   continuation.seed_local(
     span<const detail::PartitionLocalSearchEntry>{inherited});
   const RemotePtr remote{1, 128};
-  assert(continuation.try_visit_remote(remote));
-  continuation.add_remote(remote, nan);
+  assert(continuation.try_visit(remote));
+  continuation.add_scored(remote, nan);
   assert(continuation.final_beam().size() == 2);
   for (const auto& entry : continuation.final_beam()) {
     assert(std::isinf(entry.distance));
@@ -528,7 +530,7 @@ void test_stage2_continues_stage1_without_restarting_local_search() {
   for (const auto& entry : final_beam) assert(entry.expanded);
 }
 
-void test_stage2_rejects_home_shard_returns() {
+void test_stage2_follows_new_home_shard_candidates() {
   const RemotePtr remote_a{1, 128};
   const RemotePtr remote_b{3, 256};
   const RemotePtr unseen_home = local(2);
@@ -556,18 +558,18 @@ void test_stage2_rejects_home_shard_returns() {
     [&](RemotePtr pointer, auto&& visit) {
       expanded.push_back(pointer);
       if (pointer == remote_a) {
-        visit(local(0));       // Seeded Stage1 result is not repeated.
-        visit(unseen_home);    // Stage2 never restarts the home-shard walk.
+        visit(local(0));
+        visit(unseen_home);
       } else if (pointer == unseen_home) {
         visit(remote_b);
       }
     });
 
   assert(result.size() == 2);
-  assert(result[0].rptr == remote_a);
-  assert(result[1].rptr == local(0));
-  assert((scored == vec<RemotePtr>{remote_a}));
-  assert((expanded == vec<RemotePtr>{remote_a}));
+  assert(result[0].rptr == remote_b);
+  assert(result[1].rptr == unseen_home);
+  assert((scored == vec<RemotePtr>{remote_a, unseen_home, remote_b}));
+  assert((expanded == vec<RemotePtr>{remote_a, unseen_home, remote_b}));
 }
 
 void test_completed_search_capacity_trim_preserves_reusability() {
@@ -1117,6 +1119,50 @@ void test_stage2_per_search_progress_is_not_blocked_by_delayed_peer() {
   assert(batch.result(0)[0].rptr == stable_a);
 }
 
+void test_stage2_state_machine_follows_home_return() {
+  const RemotePtr remote{1, 128};
+  const RemotePtr home = local(7);
+  const RemotePtr remote_b{3, 256};
+  const vec<detail::PartitionLocalSearchEntry> local_beam{
+    {local(0), 10.0F, true}};
+  const vec<RemotePtr> frontier{remote};
+  const std::array<detail::PartitionContinuationSeed, 1> seeds{{
+    {span<const detail::PartitionLocalSearchEntry>{local_beam},
+     span<const RemotePtr>{frontier}},
+  }};
+  detail::PartitionContinuationBatch batch;
+  batch.initialize(
+    span<const detail::PartitionContinuationSeed>{seeds.data(), seeds.size()},
+    kPartition, 2, detail::PartitionSearchBudget::unbounded());
+
+  const auto score = [&](RemotePtr pointer, distance_t distance) {
+    const u64 generation = batch.generation(0);
+    assert(batch.resolve_score_request(0, generation, pointer, distance));
+  };
+  const auto expand = [&](RemotePtr pointer,
+                          span<const RemotePtr> neighbors) {
+    const u64 generation = batch.generation(0);
+    assert(batch.resolve_expand_request(0, generation, pointer, neighbors));
+  };
+
+  score(remote, 8.0F);
+  const std::array<RemotePtr, 1> to_home{{home}};
+  expand(remote, span<const RemotePtr>{to_home.data(), to_home.size()});
+  assert(batch.pending_score_requests(0)[0].pointer == home);
+  score(home, 4.0F);
+  assert(batch.pending_expand_request(0)->pointer == home);
+  const std::array<RemotePtr, 1> to_remote{{remote_b}};
+  expand(home, span<const RemotePtr>{to_remote.data(), to_remote.size()});
+  score(remote_b, 1.0F);
+  expand(remote_b, span<const RemotePtr>{});
+
+  assert(batch.all_complete());
+  assert(batch.expansion_count_result(0) == 3);
+  assert(batch.result(0).size() == 2);
+  assert(batch.result(0)[0].rptr == remote_b);
+  assert(batch.result(0)[1].rptr == home);
+}
+
 void test_stage2_generation_rejects_stale_completions() {
   const RemotePtr remote{1, 128};
   const vec<detail::PartitionLocalSearchEntry> local_beam{
@@ -1255,7 +1301,7 @@ int main() {
   test_stage1_production_frontier_is_complete_and_deterministic();
   test_algorithm_only_frontier_limit_is_diagnostic();
   test_stage2_continues_stage1_without_restarting_local_search();
-  test_stage2_rejects_home_shard_returns();
+  test_stage2_follows_new_home_shard_candidates();
   test_completed_search_capacity_trim_preserves_reusability();
   test_stage2_policy_converges_beyond_old_l_expansion_limit();
   test_stage2_state_machine_pauses_and_resumes_between_waves();
@@ -1264,6 +1310,7 @@ int main() {
   test_stage2_batch_wavefront_preserves_independent_searches();
   test_stage2_batch_missing_snapshot_is_isolated();
   test_stage2_per_search_progress_is_not_blocked_by_delayed_peer();
+  test_stage2_state_machine_follows_home_return();
   test_stage2_generation_rejects_stale_completions();
   test_stage2_ordered_preview_is_non_mutating_and_pointer_fenced();
   test_stage2_searches_can_be_activated_independently();

@@ -71,6 +71,7 @@ struct StorageOwnerPruneCandidateInfo {
 struct StorageOwnerScoredSnapshot {
   const NodeSnapshot* snapshot{};
   distance_t distance{};
+  bool existing{};
 };
 
 struct StorageOwnerCoroutineScratch {

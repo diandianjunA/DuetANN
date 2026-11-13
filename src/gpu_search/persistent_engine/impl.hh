@@ -221,9 +221,9 @@ struct PersistentSearchEngine::Impl {
   u32* d_dynamic_code_request_shards{};
   u64* d_dynamic_code_request_offsets{};
   u64* d_dynamic_code_request_local_iovas{};
-  // Optional packed per-base-node extent classes. The at-rest sidecar remains
-  // u8/node; the device copy is u32-aligned so query CTAs can monotonically
-  // repair stale bytes with CAS. Dynamic records always use the full record.
+  // Optional per-base-node bootstrap levels. The at-rest sidecar remains
+  // u8/node; the device copy is u32-aligned so validated snapshots can adapt
+  // each byte with the same policy used for dynamic nodes.
   u32* d_graph_extent_class_words{};
   u32* d_graph_request_bytes{};
   u32* d_speculative_graph_request_shards{};

@@ -6,6 +6,7 @@
 
 #include "gpu_search/persistent_engine/cuda_helpers.hh"
 #include "gpu_search/persistent_engine/impl.hh"
+#include "gpu_search/graph_record_validation.hh"
 #include "nlohmann/json.hh"
 
 namespace gpu_search {
@@ -79,14 +80,14 @@ void PersistentSearchEngine::Impl::initialize(
     cudaDeviceGetAttribute(&gdr_supported, cudaDevAttrGPUDirectRDMASupported,
                            static_cast<int>(config.gpu_device)),
     "cudaDeviceGetAttribute(GPUDirect RDMA support)");
-  if (properties.major < 8 || properties.warpSize != 32 ||
+  if (properties.major < 7 || properties.warpSize != 32 ||
       properties.canMapHostMemory == 0 || properties.unifiedAddressing == 0 ||
       properties.deviceOverlap == 0 || properties.asyncEngineCount <= 0 ||
       gdr_supported == 0 || properties.multiProcessorCount <= 0 ||
       properties.maxThreadsPerBlock <
         static_cast<int>(kPersistentThreadCandidates.front())) {
     throw std::runtime_error(
-      "persistent GPUNetIO requires SM80+, warpSize=32, mapped host "
+      "persistent GPUNetIO requires SM70+, warpSize=32, mapped host "
       "memory, unified addressing, asynchronous copy overlap, GPUDirect "
       "RDMA, and a 128-thread CTA; "
       "device=" +
@@ -236,7 +237,7 @@ void PersistentSearchEngine::Impl::initialize(
     live_extent_graph_reads || header_neighbor_graph_reads;
   const std::filesystem::path graph_extent_path =
     index_path::graph_extent_file(config.resolved_index_prefix());
-  if (live_extent_graph_reads) {
+  if (live_extent_graph_reads && config.gpu_dynamic_graph_extent_hints) {
     if (!format::read_graph_extent_sidecar(graph_extent_path,
                                            graph_extent_header,
                                            graph_extent_classes, &load_error)) {
@@ -266,6 +267,11 @@ void PersistentSearchEngine::Impl::initialize(
               << " extent_source=" << graph_extent_path
               << " extent_classes=" << graph_extent_classes.size()
               << " extent_payload_bytes=" << graph_extent_sidecar_bytes << '\n';
+  } else if (live_extent_graph_reads) {
+    std::cerr << "[gpu-search] graph-read-policy=live-extent"
+              << " extent_quantum=" << format::kGraphExtentQuantum
+              << " extent_source=validated_online_adaptation"
+              << " extent_classes=" << index.layout.num_nodes << '\n';
   } else if (header_neighbor_graph_reads) {
     std::cerr << "[gpu-search] graph-read-policy=header-neighbor"
               << " header_bytes="
@@ -502,9 +508,11 @@ void PersistentSearchEngine::Impl::initialize(
   // The sidecar remains exactly one byte per base node on disk. Round only
   // the device allocation to a u32 word so the last real byte can be repaired
   // with an in-bounds packed CAS.
-  const u64 graph_extent_device_bytes =
-    live_extent_graph_reads ? align_up(graph_extent_sidecar_bytes, sizeof(u32))
-                            : 0;
+  const u64 graph_extent_device_bytes = live_extent_graph_reads
+    ? align_up(config.gpu_dynamic_graph_extent_hints
+                 ? graph_extent_sidecar_bytes : index.layout.num_nodes,
+               sizeof(u32))
+    : 0;
   const u64 centroid_route_bytes =
     static_cast<u64>(centroid_route_shard_capacity) *
       sizeof(DeviceCentroidRouteShard) +
@@ -646,14 +654,17 @@ void PersistentSearchEngine::Impl::initialize(
       d_graph_extent_class_words,
       static_cast<size_t>(graph_extent_device_bytes / sizeof(u32)),
       "cudaMalloc(static graph extent class words)");
-    check_cuda(cudaMemset(d_graph_extent_class_words, 0,
+    check_cuda(cudaMemset(d_graph_extent_class_words,
+                          graph_record_validation::kGraphExtentClassUnknown,
                           static_cast<size_t>(graph_extent_device_bytes)),
                "cudaMemset(static graph extent class words)");
-    check_cuda(
-      cudaMemcpy(d_graph_extent_class_words, graph_extent_classes.data(),
-                 graph_extent_classes.size() * sizeof(u8),
-                 cudaMemcpyHostToDevice),
-      "cudaMemcpy(static graph extent class words)");
+    if (config.gpu_dynamic_graph_extent_hints) {
+      check_cuda(
+        cudaMemcpy(d_graph_extent_class_words, graph_extent_classes.data(),
+                   graph_extent_classes.size() * sizeof(u8),
+                   cudaMemcpyHostToDevice),
+        "cudaMemcpy(static graph extent class words)");
+    }
   }
   device_allocate(d_opq_matrix, pq_model.rotation.size(),
                   "cudaMalloc(OPQ matrix)");
@@ -1101,7 +1112,9 @@ void PersistentSearchEngine::Impl::initialize(
     .issue_width = config.gpu_graph_issue_width,
     .beam_merge_policy = config.gpu_query_beam_merge_policy == "stable-run"
                            ? static_cast<u32>(BeamMergePolicy::stable_run)
-                           : static_cast<u32>(BeamMergePolicy::legacy),    .visited_capacity = visited_capacity,
+                           : static_cast<u32>(BeamMergePolicy::legacy),
+    .terminal_exact_prefetch_enabled = config.gpu_terminal_exact_prefetch ? 1u : 0u,
+    .visited_capacity = visited_capacity,
     .query_slots = query_slots,
     .direct_region_count = direct_view.remote_region_count,
     .direct_qps_per_node = direct_view.qps_per_node,
@@ -1149,6 +1162,9 @@ void PersistentSearchEngine::Impl::initialize(
     .graph_extent_class_words = d_graph_extent_class_words,
     .dynamic_graph_extent_enabled =
       live_extent_graph_reads && config.gpu_dynamic_graph_extent ? 1u : 0u,
+    .dynamic_graph_extent_bootstrap_enabled =
+      live_extent_graph_reads && config.gpu_dynamic_graph_extent &&
+        config.gpu_dynamic_graph_extent_hints ? 1u : 0u,
     .graph_request_bytes = d_graph_request_bytes,
     .speculative_graph_request_shards = d_speculative_graph_request_shards,
     .speculative_graph_request_offsets = d_speculative_graph_request_offsets,

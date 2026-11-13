@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <stdexcept>
 
 #include "memory_node/peer_rpc/stage1_control_fanout_policy.hh"
@@ -6,7 +7,9 @@
 
 using namespace memory_node_storage_owner_runtime_detail;
 
-void MemoryNode::service_storage_runtime(const Configuration& config) {
+void MemoryNode::service_storage_runtime(
+    const Configuration& config,
+    const storage_startup::Response& startup_response) {
   print_status("storage-owner insert runtime enabled on shard " + std::to_string(storage_id_));
   vec<ibv_wc> recv_wcs(std::max<i32>(1, config.max_recv_queue_wr));
   vec<ibv_wc> send_wcs(std::max<i32>(1, config.max_send_queue_wr));
@@ -21,6 +24,9 @@ void MemoryNode::service_storage_runtime(const Configuration& config) {
     }
   }
 
+  // The request was received before peer initialization. Publish ready only
+  // after workers and every client receive slot are available.
+  publish_storage_start_response(startup_response);
   while (!storage_insert_shutdown_.load(std::memory_order_acquire)) {
     bool progressed = false;
     const i32 num_sent = context_.poll_send_cq(
@@ -457,6 +463,14 @@ bool MemoryNode::execute_storage_owner_batch_items(const node_t* ids,
       ids[index], plan.kind, plan.operation, plan.stage1_home);
     breakdown.storage_owner_prepare_mutation_ns +=
       elapsed_ns_since(prepare_started);
+    if (mutation_completion_trace_enabled()) {
+      std::cerr << "[mutation-trace] authority begin owner=" << storage_id_
+                << " operation_id=" << operation_ids[index]
+                << " id=" << ids[index]
+                << " state=" << static_cast<u32>(plan.begin.state)
+                << " old_raw=" << plan.begin.previous.current.raw_address
+                << std::endl;
+    }
 
     if (plan.begin.state == BeginState::committed_replay) {
       plan.committed_replay = true;
@@ -559,6 +573,12 @@ bool MemoryNode::execute_storage_owner_batch_items(const node_t* ids,
                  commit == AuthorityCommitState::replay,
                "token-fenced authority commit lost its active lease");
     plan.authority_committed = true;
+    if (mutation_completion_trace_enabled()) {
+      std::cerr << "[mutation-trace] authority commit owner=" << storage_id_
+                << " operation_id=" << operation_ids[index]
+                << " id=" << ids[index]
+                << " sequence=" << maintenance_sequence << std::endl;
+    }
 
     if (statuses != nullptr) {
       (*statuses)[index] = static_cast<u32>(MutationStatus::ok);
@@ -632,6 +652,14 @@ bool MemoryNode::execute_storage_owner_batch_items(const node_t* ids,
     } catch (...) {
       finish_stage1_inflight_request(key);
       throw;
+    }
+    if (mutation_completion_trace_enabled()) {
+      std::cerr << "[mutation-trace] local stage1 home=" << storage_id_
+                << " operation_id=" << plan.stage1_item.client_batch_id
+                << " id=" << ids[index]
+                << " status=" << plan.stage1_result.status
+                << " sequence=" << plan.stage1_result.maintenance_sequence
+                << std::endl;
     }
     finish_stage1_inflight_request(key);
   };
@@ -792,6 +820,10 @@ bool MemoryNode::execute_storage_owner_batch_items(const node_t* ids,
   breakdown.storage_owner_stage1_execute_wait_ns +=
     stage1_critical_path_ns > local_stage1_elapsed_ns
       ? stage1_critical_path_ns - local_stage1_elapsed_ns : 0;
+  if (mutation_completion_trace_enabled()) {
+    std::cerr << "[mutation-trace] stage1 fanout end owner=" << storage_id_
+              << " ok=" << stage1_transport_ok << std::endl;
+  }
   if (!stage1_transport_ok) {
     // A fused request may already own a runnable Stage2 descriptor at its
     // physical home. Transport uncertainty is not a semantic prepare failure.
@@ -861,6 +893,13 @@ bool MemoryNode::execute_storage_owner_batch_items(const node_t* ids,
     });
   }
   if (!local_fused_items.empty()) {
+    if (mutation_completion_trace_enabled()) {
+      for (const Stage1ArmItem& item : local_fused_items) {
+        std::cerr << "[mutation-trace] local arm begin owner=" << storage_id_
+                  << " operation_id=" << item.token.client_batch_id
+                  << " id=" << item.id << std::endl;
+      }
+    }
     const auto arm_started = std::chrono::steady_clock::now();
     vec<Stage1ArmResult> arm_results;
     (void)arm_local_stage1_items(
@@ -918,6 +957,25 @@ bool MemoryNode::execute_storage_owner_batch_items(const node_t* ids,
           }
           if (disposition == memory_node_peer_rpc_detail::
                 Stage1ControlResponseDisposition::retry) {
+            if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+              static std::mutex debug_mutex;
+              static std::unordered_map<
+                u64, std::chrono::steady_clock::time_point> last_logs;
+              const auto now = std::chrono::steady_clock::now();
+              std::lock_guard<std::mutex> lock(debug_mutex);
+              auto& last = last_logs[arm_item.token.client_batch_id];
+              if (now - last >= std::chrono::seconds(5)) {
+                last = now;
+                std::cerr << "[local-fused-arm-retry] self=" << storage_id_
+                          << " id=" << arm_item.id
+                          << " operation_id=" << arm_item.token.client_batch_id
+                          << " generation=" << arm_item.generation
+                          << " action=" << arm_item.action
+                          << " target=" << arm_item.target_raw
+                          << " status=" << (one_result.empty()
+                            ? 255 : one_result.front().status) << std::endl;
+              }
+            }
             retry_slots.push_back(slot);
             continue;
           }
@@ -1137,13 +1195,67 @@ bool MemoryNode::execute_storage_owner_batch_items(const node_t* ids,
     cleanup_items.push_back(plan.cleanup_item);
   }
   vec<CleanupActivateResult> cleanup_results;
+  const auto commit_activated_cleanup = [&] (
+      span<const CleanupActivateItem> activated,
+      span<const CleanupActivateResult> activated_results) {
+    lib_assert(activated.size() == activated_results.size(),
+               "cleanup activation callback lost its input alignment");
+    for (size_t slot = 0; slot < activated.size(); ++slot) {
+      const size_t index = plan_index_for_token(
+        activated[slot].token.source_client,
+        activated[slot].token.client_batch_id);
+      lib_assert(index < plans.size(),
+                 "cleanup activation callback referenced an invalid mutation");
+      MutationPlan& plan = plans[index];
+      lib_assert(plan.active && plan.kind != MutationKind::insert &&
+                   plan.cleanup_item.token.source_client ==
+                     activated[slot].token.source_client &&
+                   plan.cleanup_item.token.item_index ==
+                     activated[slot].token.item_index &&
+                   plan.cleanup_item.token.client_batch_id ==
+                     activated[slot].token.client_batch_id &&
+                   plan.cleanup_item.old_raw == activated[slot].old_raw &&
+                   plan.cleanup_item.id == activated[slot].id &&
+                   plan.cleanup_item.old_generation ==
+                     activated[slot].old_generation &&
+                   activated_results[slot].maintenance_sequence != 0,
+                 "cleanup activation callback crossed a mutation token");
+      if (plan.authority_committed) {
+        lib_assert(plan.cleanup_result.maintenance_sequence ==
+                     activated_results[slot].maintenance_sequence,
+                   "committed cleanup replay changed its maintenance fence");
+        continue;
+      }
+      plan.cleanup_result = activated_results[slot];
+      if (plan.kind == MutationKind::erase) commit_plan(index);
+    }
+  };
   bool cleanup_ok = cleanup_items.empty();
   const auto cleanup_started = std::chrono::steady_clock::now();
   while (!cleanup_ok &&
          !storage_insert_shutdown_.load(std::memory_order_acquire)) {
+    if (mutation_completion_trace_enabled()) {
+      for (const CleanupActivateItem& item : cleanup_items) {
+        const RemotePtr target{item.old_raw};
+        std::cerr << "[mutation-trace] cleanup begin authority=" << storage_id_
+                  << " home=" << target.memory_node()
+                  << " operation_id=" << item.token.client_batch_id
+                  << " id=" << item.id << " generation=" << item.old_generation
+                  << std::endl;
+      }
+    }
     cleanup_ok = activate_cleanup_fanout_and_wait(
       span<const CleanupActivateItem>{cleanup_items}, cleanup_results,
-      config);
+      config, commit_activated_cleanup);
+    if (mutation_completion_trace_enabled()) {
+      for (const CleanupActivateResult& result : cleanup_results) {
+        std::cerr << "[mutation-trace] cleanup end authority=" << storage_id_
+                  << " operation_id=" << result.token.client_batch_id
+                  << " status=" << result.status
+                  << " sequence=" << result.maintenance_sequence
+                  << " complete=" << cleanup_ok << std::endl;
+      }
+    }
     if (!cleanup_ok) {
       for (const CleanupActivateResult& result : cleanup_results) {
         const auto status = static_cast<MutationStatus>(result.status);
@@ -1199,10 +1311,10 @@ bool MemoryNode::execute_storage_owner_batch_items(const node_t* ids,
 
   }
 
-  // Cleanup-only mutations do not participate in a Stage1 arm group. Fresh
-  // fused inserts were already committed by their per-home Execute callback
-  // (or by the local ARM completion); the idempotent call here is an audit that
-  // no successful fused item escaped its immediate linearization point.
+  // Cleanup-only mutations do not participate in a Stage1 arm group. Erases
+  // commit as each cleanup activation ACK arrives, and fresh fused inserts
+  // commit by their per-home Execute callback (or local ARM completion). This
+  // idempotent call audits that neither path escaped immediate linearization.
   for (size_t index = 0; index < item_count; ++index) {
     if (plans[index].active &&
         (plans[index].kind == MutationKind::erase ||

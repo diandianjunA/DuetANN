@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -119,6 +120,14 @@ public:
     const u32 id = ids_.front();
     ids_.pop_front();
     return id;
+  }
+
+  bool replace(u32 previous, u32 replacement) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = std::find(ids_.begin(), ids_.end(), previous);
+    if (found == ids_.end()) return false;
+    *found = replacement;
+    return true;
   }
 
   size_t size() const {

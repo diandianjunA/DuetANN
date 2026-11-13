@@ -203,15 +203,19 @@ int main() {
   namespace format = gpu_search::format;
   namespace offline = tools::vamana_offline;
 
+  constexpr u32 quantum = format::kGraphExtentQuantum;
+  constexpr auto class_for = [](u32 edges) {
+    return (edges + quantum - 1) / quantum;
+  };
   assert(sizeof(format::GraphExtentHeader) == 128);
   assert(format::graph_extent_class(0) == 0);
   assert(format::graph_extent_class(1) == 1);
-  assert(format::graph_extent_class(8) == 1);
-  assert(format::graph_extent_class(9) == 2);
-  assert(format::graph_extent_class(136) == 17);
+  assert(format::graph_extent_class(quantum) == 1);
+  assert(format::graph_extent_class(quantum + 1) == 2);
+  assert(format::graph_extent_class(136) == class_for(136));
   assert(format::graph_extent_read_bytes(0, 1104) == 16);
-  assert(format::graph_extent_read_bytes(1, 1104) == 80);
-  assert(format::graph_extent_read_bytes(17, 1104) == 1104);
+  assert(format::graph_extent_read_bytes(1, 1104) == 16 + quantum * 8);
+  assert(format::graph_extent_read_bytes(class_for(136), 1104) == 1104);
 
   const TemporaryDirectory temporary = make_temporary_directory();
   const filepath_t prefix = write_index(temporary.path);
@@ -228,14 +232,15 @@ int main() {
   assert(built.node_count == 5);
   assert(built.payload_bytes == 5);
   assert(built.graph_bytes_validated == 5 * kEntryBytes);
-  assert(built.maximum_class == 2);
+  assert(built.maximum_class == class_for(16));
 
   format::GraphExtentHeader header;
   std::vector<u8> classes;
   std::string error;
   assert(format::read_graph_extent_sidecar(
     built.output, header, classes, &error));
-  assert(classes == std::vector<u8>({0, 1, 1, 2, 2}));
+  assert(classes == std::vector<u8>({
+    0, class_for(1), class_for(8), class_for(9), class_for(16)}));
   assert(header.num_nodes == 5);
   assert(header.num_shards == kShards);
   assert(header.graph_entry_bytes == kEntryBytes);

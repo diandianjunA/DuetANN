@@ -567,6 +567,14 @@ void test_maintenance_log_window() {
   assert(!empty_post_stop.packing_delta_available);
   assert(!empty_post_stop.p99_stage2_delay_available);
 
+  const auto current = tools::breakdown_benchmark::
+    summarize_current_maintenance_logs({path.string()});
+  assert(current.readable_logs == 1);
+  assert(current.logs_with_observations == 1);
+  assert(current.observations == 4);
+  assert(current.remaining == 0);
+  assert(current.completion_incomplete == 0);
+
   {
     std::ofstream output(path, std::ios::app);
     write_observation(output, 303, 300, 3, 10, 7, histogram);
@@ -811,6 +819,12 @@ void test_in_band_maintenance_snapshot_window() {
     latest.stage2_home_score_rpc_queries += 40;
     latest.stage2_home_score_rpc_request_bytes += 20'000;
     latest.stage2_home_score_rpc_response_bytes += 10'000;
+    latest.stage2_score_home_wait_ns += 100'000;
+    latest.stage2_graph_home_wait_ns += 200'000;
+    latest.stage2_score_home_dispatches += 10;
+    latest.stage2_graph_home_dispatches += 20;
+    latest.stage2_dual_plane_dispatches += 5;
+    latest.stage2_dual_plane_waits += 4;
     latest.stage2_delay_histogram[8] = 20;
     latest.active_stage2_contexts = 30 + shard;
     latest.active_stage2_context_limit = 32;
@@ -893,6 +907,12 @@ void test_in_band_maintenance_snapshot_window() {
   assert(summary.stage2_home_score_rpc_queries == 80);
   assert(summary.stage2_home_score_rpc_request_bytes == 40'000);
   assert(summary.stage2_home_score_rpc_response_bytes == 20'000);
+  assert(summary.stage2_score_home_wait_ns == 200'000);
+  assert(summary.stage2_graph_home_wait_ns == 400'000);
+  assert(summary.stage2_score_home_dispatches == 20);
+  assert(summary.stage2_graph_home_dispatches == 40);
+  assert(summary.stage2_dual_plane_dispatches == 10);
+  assert(summary.stage2_dual_plane_waits == 8);
   assert(summary.timing_counter_delta_available);
   assert(summary.logs_with_timing_counter_deltas == 2);
   assert(summary.stage2_phase_attempts[0] == 20);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include "common/types.hh"
 
@@ -32,40 +33,40 @@ inline bool storage_owner_retry_deadline_elapsed(
   return retry_not_before_ns == 0 || now_ns >= retry_not_before_ns;
 }
 
-// Lower bound on one shard's submitted-but-not-durable Stage2 maintenance
-// sequences, from the storage-published watermarks and this client's highest
-// observed completion target. next_sequence is the next sequence the shard
-// will assign, so an idle shard (next = durable + 1) reports zero backlog.
-inline u64 storage_owner_flow_control_backlog(
+// Accepted maintenance debt used by the time-based admission controller.
+// Include completion targets observed since the last watermark refresh so a
+// stale storage snapshot cannot hide this client's accepted work.
+inline u64 storage_owner_repair_backlog(
     u64 next_sequence,
     u64 target_sequence,
     u64 durable_sequence) {
-  const u64 acknowledged = std::max(target_sequence, durable_sequence);
-  if (next_sequence <= acknowledged) return 0;
-  const u64 span = next_sequence - acknowledged;
-  return span > 1 ? span - 1 : 0;
+  const u64 accepted = std::max(
+    target_sequence, next_sequence == 0 ? 0 : next_sequence - 1);
+  return accepted > durable_sequence ? accepted - durable_sequence : 0;
 }
 
-// Per-batch sender pacing delay for the observed shard backlog. Zero delay
-// means no throttling: the feature is disabled, the backlog is at or below
-// the low watermark, or no maximum delay is configured. Between the
-// watermarks the delay grows linearly; at or above the high watermark the
-// configured maximum applies.
-inline u64 storage_owner_flow_control_delay_ns(
-    u64 backlog,
-    u32 backlog_low,
-    u32 backlog_high,
-    u64 max_delay_ns) {
-  if (backlog_low == 0 || backlog_high <= backlog_low || max_delay_ns == 0) {
-    return 0;
+// Deadline admission is a service-level objective, not a guarantee about
+// future hardware speed. Unknown rates hold further submissions until a real
+// measurement exists; measured rates reserve time to drain accepted debt.
+inline bool storage_owner_repair_deadline_blocked(
+    u64 oldest_age_ns, u64 backlog, double durable_rate_per_sec,
+    u64 deadline_ns) {
+  if (deadline_ns == 0 || backlog == 0) return false;
+  if (oldest_age_ns >= deadline_ns) return true;
+  if (!(durable_rate_per_sec > 0.0) ||
+      !std::isfinite(durable_rate_per_sec)) {
+    return true;
   }
-  if (backlog <= backlog_low) return 0;
-  if (backlog >= backlog_high) return max_delay_ns;
-  const u64 range = static_cast<u64>(backlog_high) - backlog_low;
-  const u64 risen = backlog - backlog_low;
-  // Split the product so risen * (max % range) stays below range^2 <= 2^64.
-  return max_delay_ns / range * risen +
-    (max_delay_ns % range) * risen / range;
+  const long double remaining_ns =
+    static_cast<long double>(backlog) * 1'000'000'000.0L /
+    static_cast<long double>(durable_rate_per_sec);
+  return remaining_ns >
+    static_cast<long double>(deadline_ns - oldest_age_ns);
+}
+
+inline bool storage_owner_repair_deadline_exceeded(
+    u64 repair_delay_ns, u64 deadline_ns) {
+  return deadline_ns != 0 && repair_delay_ns > deadline_ns;
 }
 
 inline bool storage_owner_batch_wait_elapsed(

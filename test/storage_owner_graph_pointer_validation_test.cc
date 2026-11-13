@@ -45,16 +45,20 @@ int main() {
   assert(VamanaNode::hot_graph_record_kind_matches(valid_dynamic));
   assert(!VamanaNode::hot_graph_record_kind_matches(untagged_dynamic));
 
-  // DynaExtent reuses the existing four-byte PQ validation prefix for the
-  // extent hint.  A four-byte incarnation-bound trailer closes torn PQ reads;
-  // in the production R96/PQ32 layout it consumes existing alignment padding,
-  // so neither the physical dynamic-record stride nor update WQE count grows.
+  // The optional PQ-tag bootstrap reuses the existing four-byte validation
+  // prefix. The incarnation-bound trailer closes torn PQ reads without
+  // growing the production R96/PQ32 record stride or update WQE count.
   static_assert(VamanaNode::DYNAMIC_CODE_TAG_BYTES == sizeof(u32));
   static_assert(VamanaNode::DYNAMIC_CODE_INCARNATION_MASK == 0x00ffffffu);
-  assert(VamanaNode::graph_extent_class(0, 0) == 0);
-  assert(VamanaNode::graph_extent_class(8, 0) == 1);
-  assert(VamanaNode::graph_extent_class(8, 1) == 2);
-  assert(VamanaNode::graph_extent_class(96, 6) == 13);
+  constexpr auto expected_level = [](u32 stable, u32 provisional) {
+    const u32 total = stable + provisional;
+    return total / VamanaNode::GRAPH_EXTENT_EDGES_PER_CLASS +
+      (total % VamanaNode::GRAPH_EXTENT_EDGES_PER_CLASS != 0 ? 1u : 0u);
+  };
+  assert(VamanaNode::graph_extent_class(0, 0) == expected_level(0, 0));
+  assert(VamanaNode::graph_extent_class(8, 0) == expected_level(8, 0));
+  assert(VamanaNode::graph_extent_class(8, 1) == expected_level(8, 1));
+  assert(VamanaNode::graph_extent_class(96, 6) == expected_level(96, 6));
   constexpr u32 dynamic_tag = VamanaNode::pack_dynamic_navigation_tag(
     0x00abc123u, 13);
   static_assert(VamanaNode::dynamic_navigation_tag_incarnation(dynamic_tag) ==

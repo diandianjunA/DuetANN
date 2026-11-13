@@ -33,8 +33,11 @@ void ServerConnectionManager::connect_to_clients() {
   context_.bind_to_port(config_.port);
 
   // connect queue pairs and order them by client ids
-  for (u32 i = 0; i < config_.num_clients; ++i) {
-    if (client_qps[i] != nullptr) continue;
+  u32 remaining_clients = 0;
+  for (const QP& qp : client_qps) {
+    if (qp == nullptr) ++remaining_clients;
+  }
+  for (u32 i = 0; i < remaining_clients; ++i) {
     auto [qp, client_id] = context_.wait_for_connection();
     lib_assert(client_id < client_qps.size(),
                "connecting client ID exceeds --num-clients");
@@ -71,6 +74,25 @@ void ServerConnectionManager::reset_for_reconnect() {
 void ClientConnectionManager::connect() {
   connect_among_clients();
   distribute_client_ids();
+  if (is_initiator) {
+    connect_to_servers();
+    for (QP& qp : client_qps) {
+      u64 servers_connected = 1;
+      qp->post_send_inlined(&servers_connected, sizeof(servers_connected),
+                            IBV_WR_SEND);
+    }
+    context_.poll_send_cq_until_completion(
+      static_cast<i32>(config_.num_client_nodes()));
+    return;
+  }
+
+  u64 servers_connected = 0;
+  LocalMemoryRegion region{context_, &servers_connected,
+                           sizeof(servers_connected)};
+  initiator_qp->post_receive(region);
+  context_.receive();
+  lib_assert(servers_connected == 1,
+             "initiator did not complete server connections");
   connect_to_servers();
 }
 

@@ -12,25 +12,8 @@ namespace {
 
 template <u32 Threads, bool EnableAsfe, u32 PqSubquantizers>
 const void* persistent_search_kernel_address() {
-  const void* kernel = reinterpret_cast<const void*>(
+  return reinterpret_cast<const void*>(
     persistent_search_kernel<Threads, EnableAsfe, PqSubquantizers>);
-  // The LUT tile scorer rides on dynamic shared memory.  Static shared
-  // (48,544 B) plus the tile exceeds the default 48-KiB per-block shared
-  // limit, so every instantiation opts into the extended limit once before
-  // its first occupancy query or launch.
-  static const bool configured = [kernel] {
-    const cudaError_t status = cudaFuncSetAttribute(
-      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-      static_cast<int>(kPersistentPqLutTileBytes));
-    if (status != cudaSuccess) {
-      throw std::runtime_error(
-        std::string("cudaFuncSetAttribute(persistent search LUT tile): ") +
-        cudaGetErrorString(status));
-    }
-    return true;
-  }();
-  (void)configured;
-  return kernel;
 }
 
 template <u32 Threads, bool EnableAsfe>
@@ -64,15 +47,11 @@ template <u32 Threads, bool EnableAsfe>
 void launch_persistent_search_kernel(cudaStream_t stream,
                                      const PersistentKernelParams& params,
                                      u32 blocks) {
-  // The static-code PQ scorer stages its LUT tiles in dynamic shared memory
-  // (score_static_candidates_lut_tiled); every specialization carries the
-  // same tile capacity.  Launching through the selected pointer reuses the
-  // one-time shared-memory attribute configuration above.
   using KernelEntry = void (*)(PersistentKernelParams);
   const auto kernel = reinterpret_cast<KernelEntry>(const_cast<void*>(
     select_persistent_search_kernel<Threads, EnableAsfe>(
       params.pq_subquantizers)));
-  kernel<<<blocks, Threads, kPersistentPqLutTileBytes, stream>>>(params);
+  kernel<<<blocks, Threads, 0, stream>>>(params);
 }
 
 }  // namespace
@@ -111,8 +90,7 @@ PersistentKernelOccupancy inspect_persistent_search_kernel(u32 threads,
   }
   int active_blocks = 0;
   status = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-    &active_blocks, kernel, static_cast<int>(threads),
-    kPersistentPqLutTileBytes);
+    &active_blocks, kernel, static_cast<int>(threads), 0);
   if (status != cudaSuccess) {
     throw std::runtime_error(
       std::string(

@@ -8,6 +8,7 @@
 #include "gpu/gpunetio_probe.hh"
 #include "gpu_search/device_ring.cuh"
 #include "gpu_search/types.hh"
+#include "vamana/graph_extent_policy.hh"
 
 // The production persistent query kernel runs 128-thread CTAs with the
 // stable-run beam merge.  The 256-thread (wide) and legacy merge sort paths
@@ -21,11 +22,17 @@
 #ifndef DVSTOR_PERSISTENT_LEGACY_MERGE
 #define DVSTOR_PERSISTENT_LEGACY_MERGE 0
 #endif
+#ifndef DVSTOR_PERSISTENT_MAX_BEAM
+#define DVSTOR_PERSISTENT_MAX_BEAM 256
+#endif
+#ifndef DVSTOR_PERSISTENT_MAX_EXACT
+#define DVSTOR_PERSISTENT_MAX_EXACT 512
+#endif
 
 namespace gpu_search {
 
-inline constexpr u32 kPersistentMaxBeam = kMaxPersistentTraversalBeam;
-inline constexpr u32 kPersistentMaxExact = 512;
+inline constexpr u32 kPersistentMaxBeam = DVSTOR_PERSISTENT_MAX_BEAM;
+inline constexpr u32 kPersistentMaxExact = DVSTOR_PERSISTENT_MAX_EXACT;
 inline constexpr u32 kPersistentMaxSubquantizers = kMaxPersistentSubquantizers;
 // Zero selects the compatibility kernel whose PQ loop remains runtime-sized.
 // The production datasets use one of the compile-time specializations
@@ -53,20 +60,11 @@ inline constexpr u32 persistent_pq_kernel_specialization(
   }
 }
 
-// Static-code PQ scoring stages the per-query distance LUT in dynamic shared
-// memory one subquantizer tile at a time: the whole CTA copies one contiguous
-// tile with fully coalesced float4 loads, then every candidate gathers only
-// from shared memory.  A tile of four subquantizers is one packed u32 code
-// load per candidate and costs 4 KiB of dynamic shared memory, which keeps
-// three 128-thread CTAs resident per SM on GA100-class parts (48,532 B static
-// + 4,096 B dynamic + reservation < 164 KiB / 3).  The persistent kernel is
-// always launched with kPersistentPqLutTileBytes of dynamic shared memory.
+// Shared-LUT scoring remains available to the standalone correctness test and
+// microbenchmark. Production persistent queries score directly from the LUT.
 inline constexpr u32 kPersistentPqLutTileSubquantizers = 4;
 inline constexpr u32 kPersistentPqLutTileBytes =
   kPersistentPqLutTileSubquantizers * 256u * 4u;
-// Below this candidate count the tile staging cost dominates and the direct
-// per-candidate scoring loop (identical arithmetic) is cheaper.
-inline constexpr u32 kPersistentPqLutTileMinCandidates = 128;
 inline constexpr u32 kPersistentMaxGraphDegree = 128;
 // The authoritative commit frontier preserves the legacy maximum batch width.
 // The speculative ROB is independently bounded by the same compile-time
@@ -495,6 +493,7 @@ struct PersistentKernelParams {
   u32 commit_width{};
   u32 issue_width{};
   u32 beam_merge_policy{};
+  u32 terminal_exact_prefetch_enabled{1};
   u32 visited_capacity{};
   u32 query_slots{};
   u32 direct_region_count{};
@@ -548,17 +547,15 @@ struct PersistentKernelParams {
   // the two transfers restarts the two-stage snapshot instead of accepting a
   // torn header/body splice.
   u32 graph_read_policy{static_cast<u32>(GraphReadPolicy::fixed)};
-  // Four eight-edge extent classes per aligned word, indexed by static
-  // ordinal. Class zero is a header-only 16-byte record, class n covers n*8
-  // neighbor slots, and 0xff means unknown/full-record. The device copy is a
-  // monotonic high-water cache: a verified header that outgrows its offline
-  // hint atomically promotes only its byte. A null pointer keeps the legacy
-  // fixed-size graph READ path exactly intact.
+  // Four quantized extent levels per aligned word, indexed by base ordinal.
+  // Level zero is a header-only 16-byte record, 0xff means unknown/full-read,
+  // and validated snapshots adapt individual bytes with the common policy.
+  // A null pointer keeps the fixed-size graph READ path exactly intact.
   u32* graph_extent_class_words{};
-  // Enables incarnation-scoped graph hints piggybacked by dynamic PQ reads.
-  // Kept independent from the static sidecar for base-only/complete
-  // Live-Extent ablations; zero leaves dynamic records on full graph reads.
+  // Enables dynamic PQ-tag bootstrap hints. Runtime adaptation is otherwise
+  // shared with base nodes; zero leaves dynamic records on full graph reads.
   u32 dynamic_graph_extent_enabled{};
+  u32 dynamic_graph_extent_bootstrap_enabled{1};
   // Per-query-slot global metadata consumed asynchronously by QP-owner warps.
   // Only the first kPersistentMaxPrefetch entries of each query slot are used
   // by graph fetches.
@@ -642,6 +639,16 @@ __host__ __device__
   return static_cast<u8>(extent < kPersistentDynamicCodeArenaUnknownExtent
                            ? extent
                            : kPersistentDynamicCodeArenaUnknownExtent);
+}
+
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+  inline constexpr u8
+  dynamic_code_arena_bootstrap_extent(u32 source_tag, u32 bootstrap_enabled) {
+  return bootstrap_enabled != 0
+    ? dynamic_code_tag_extent_class(source_tag)
+    : kPersistentDynamicCodeArenaUnknownExtent;
 }
 
 #ifdef __CUDACC__
@@ -755,32 +762,30 @@ __host__ __device__
   return true;
 }
 
-// Apply asymmetric hysteresis to graph shrinkage.  A verified snapshot must
-// be at least two classes below the cached hint before the cache moves down,
-// and the retained one-class guard absorbs an immediate small regrowth.  The
-// exact incarnation check gives this pure transition the same slot-reuse
-// protection as upward repair.
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-  inline constexpr bool
-  dynamic_code_arena_guarded_demoted_extent_state(u32 observed_state,
-                                                  u32 desired_incarnation,
-                                                  u8 observed_graph_class,
-                                                  u32& demoted_state) {
-  demoted_state = observed_state;
+  inline constexpr vamana::graph_extent::AdaptationResult
+  dynamic_code_arena_adapted_extent_state(u32 observed_state,
+                                          u32 desired_incarnation,
+                                          u8 observed_graph_class,
+                                          u32& adapted_state) {
+  adapted_state = observed_state;
   if (!dynamic_code_arena_state_matches(observed_state, desired_incarnation) ||
       observed_graph_class >= kPersistentDynamicCodeArenaUnknownExtent) {
-    return false;
+    return {};
   }
-  const u8 cached_extent = dynamic_code_tag_extent_class(observed_state);
-  if (cached_extent == kPersistentDynamicCodeArenaUnknownExtent ||
-      static_cast<u32>(observed_graph_class) + 2u > cached_extent) {
-    return false;
+  const u8 cached = dynamic_code_tag_extent_class(observed_state);
+  const auto transition = vamana::graph_extent::adapt_level(
+    cached == kPersistentDynamicCodeArenaUnknownExtent
+      ? vamana::graph_extent::kUnknownLevel
+      : cached,
+    observed_graph_class);
+  if (transition.adaptation == vamana::graph_extent::Adaptation::none) {
+    return transition;
   }
-  demoted_state = make_dynamic_code_tag(
-    desired_incarnation, static_cast<u8>(observed_graph_class + 1u));
-  return true;
+  adapted_state = make_dynamic_code_tag(desired_incarnation, transition.level);
+  return transition;
 }
 
 struct PersistentKernelOccupancy {

@@ -3,7 +3,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <iostream>
 #include <mutex>
+#include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -34,6 +38,17 @@ class CertificateLeaseTable {
       return CertificateAcquireResult::conflict;
     }
     std::lock_guard<std::mutex> lock(mutex_);
+    if (sequence <= finalized_sequence_) {
+      return CertificateAcquireResult::replay;
+    }
+    const auto target_released = released_.find(target_raw);
+    if (target_released != released_.end()) {
+      const auto released = target_released->second.find(child_raw);
+      if (released != target_released->second.end() &&
+          released->second >= sequence) {
+        return CertificateAcquireResult::replay;
+      }
+    }
     auto& target = leases_[target_raw];
     const auto found = target.find(child_raw);
     if (found != target.end()) {
@@ -50,16 +65,7 @@ class CertificateLeaseTable {
 
   bool release(std::uint64_t target_raw, std::uint64_t child_raw,
                std::uint64_t sequence) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto target = leases_.find(target_raw);
-    if (target == leases_.end()) return true;
-    const auto found = target->second.find(child_raw);
-    if (found == target->second.end()) return true;
-    if (sequence != 0 && found->second != sequence) return false;
-    target->second.erase(found);
-    --size_;
-    if (target->second.empty()) leases_.erase(target);
-    return true;
+    return commit(target_raw, {}, {{child_raw, sequence}});
   }
 
   bool commit(
@@ -72,21 +78,52 @@ class CertificateLeaseTable {
       existing == leases_.end()
         ? std::unordered_map<std::uint64_t, std::uint64_t>{}
         : existing->second;
+    const auto existing_released = released_.find(target_raw);
+    std::unordered_map<std::uint64_t, std::uint64_t> completed =
+      existing_released == released_.end()
+        ? std::unordered_map<std::uint64_t, std::uint64_t>{}
+        : existing_released->second;
     for (const auto& [child, sequence] : released) {
       const auto found = updated.find(child);
       if (found != updated.end()) {
-        if (sequence != 0 && found->second != sequence) return false;
+        if (sequence != 0 && found->second != sequence) continue;
         updated.erase(found);
       }
+      const auto [position, inserted] = completed.emplace(child, sequence);
+      if (!inserted) position->second = std::max(position->second, sequence);
     }
     for (const auto& [child, sequence] : acquired) {
       if (child == 0 || sequence == 0) return false;
+      if (sequence <= finalized_sequence_) continue;
+      const auto released = completed.find(child);
+      if (released != completed.end() && released->second >= sequence) {
+        continue;
+      }
       const auto found = updated.find(child);
       if (found != updated.end() && found->second != sequence) return false;
       if (found == updated.end() && updated.size() >= degree_limit_) {
         return false;
       }
       updated[child] = sequence;
+    }
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      const auto trace = [&](const char* action, std::uint64_t child,
+                             std::uint64_t sequence) {
+        const auto found = updated.find(child);
+        std::string message = std::string("[lease-lifecycle] action=") +
+          action + " target=" + std::to_string(target_raw) +
+          " child=" + std::to_string(child) +
+          " sequence=" + std::to_string(sequence) + " remaining=";
+        message += found == updated.end() ? std::to_string(-1)
+                                         : std::to_string(found->second);
+        std::cerr << message << std::endl;
+      };
+      for (const auto& [child, sequence] : acquired) {
+        trace("acquire", child, sequence);
+      }
+      for (const auto& [child, sequence] : released) {
+        trace("release", child, sequence);
+      }
     }
     const std::size_t previous =
       existing == leases_.end() ? 0 : existing->second.size();
@@ -96,8 +133,44 @@ class CertificateLeaseTable {
     } else {
       leases_[target_raw] = std::move(updated);
     }
+    if (completed.empty()) {
+      released_.erase(target_raw);
+    } else {
+      released_[target_raw] = std::move(completed);
+    }
     size_ = size_ - previous + next;
     return true;
+  }
+
+  std::size_t release_target(std::uint64_t target_raw) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto target = leases_.find(target_raw);
+    const std::size_t released = target == leases_.end()
+      ? 0 : target->second.size();
+    size_ -= released;
+    if (target != leases_.end()) leases_.erase(target);
+    return released;
+  }
+
+  void discard_released_through(std::uint64_t finalized_sequence) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (finalized_sequence <= finalized_sequence_) return;
+    finalized_sequence_ = finalized_sequence;
+    for (auto target = released_.begin(); target != released_.end();) {
+      for (auto child = target->second.begin();
+           child != target->second.end();) {
+        if (child->second <= finalized_sequence_) {
+          child = target->second.erase(child);
+        } else {
+          ++child;
+        }
+      }
+      if (target->second.empty()) {
+        target = released_.erase(target);
+      } else {
+        ++target;
+      }
+    }
   }
 
   bool contains(std::uint64_t target_raw, std::uint64_t child_raw,
@@ -130,6 +203,19 @@ class CertificateLeaseTable {
     return result;
   }
 
+  std::vector<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>> snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>> result;
+    result.reserve(size_);
+    for (const auto& [target, children] : leases_) {
+      for (const auto& [child, sequence] : children) {
+        result.emplace_back(target, child, sequence);
+      }
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+  }
+
   std::size_t size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return size_;
@@ -138,6 +224,8 @@ class CertificateLeaseTable {
   void clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     leases_.clear();
+    released_.clear();
+    finalized_sequence_ = 0;
     size_ = 0;
   }
 
@@ -146,6 +234,9 @@ class CertificateLeaseTable {
   mutable std::mutex mutex_;
   std::unordered_map<std::uint64_t,
                      std::unordered_map<std::uint64_t, std::uint64_t>> leases_;
+  std::unordered_map<std::uint64_t,
+                     std::unordered_map<std::uint64_t, std::uint64_t>> released_;
+  std::uint64_t finalized_sequence_{};
   std::size_t size_{};
 };
 

@@ -623,9 +623,27 @@ void test_fused_arm_propagation_replays_uncertain_handoffs() {
   assert(execute.maintenance_sequence == 0);
 }
 
+void test_cleanup_snapshot_does_not_turn_contention_into_not_found() {
+  using memory_node_peer_rpc_detail::CleanupActivationSnapshotDisposition;
+  using memory_node_peer_rpc_detail::cleanup_activation_snapshot;
+  assert(cleanup_activation_snapshot(false, false, false) ==
+         CleanupActivationSnapshotDisposition::retry);
+  assert(cleanup_activation_snapshot(false, true, false) ==
+         CleanupActivationSnapshotDisposition::retry);
+  assert(cleanup_activation_snapshot(true, false, false) ==
+         CleanupActivationSnapshotDisposition::not_found);
+  assert(cleanup_activation_snapshot(true, false, true) ==
+         CleanupActivationSnapshotDisposition::not_found);
+  assert(cleanup_activation_snapshot(true, true, false) ==
+         CleanupActivationSnapshotDisposition::live);
+  assert(cleanup_activation_snapshot(true, true, true) ==
+         CleanupActivationSnapshotDisposition::deleted);
+}
+
 }  // namespace
 
 int main() {
+  test_cleanup_snapshot_does_not_turn_contention_into_not_found();
   test_stage2_home_queue_cannot_starve_behind_stage1();
   test_stage1_workers_share_authoritative_home_work();
   test_stage2_home_response_family_is_complete();

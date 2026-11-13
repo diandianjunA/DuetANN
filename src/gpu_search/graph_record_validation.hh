@@ -2,6 +2,9 @@
 
 #include <cstdint>
 
+#include "common/constants.hh"
+#include "vamana/graph_extent_policy.hh"
+
 namespace gpu_search::graph_record_validation {
 
 enum class SnapshotState : std::uint8_t {
@@ -17,16 +20,30 @@ enum class ReadAction : std::uint8_t {
   fail,
 };
 
-inline constexpr std::uint32_t kGraphRecordHeaderBytes = 16;
-inline constexpr std::uint32_t kGraphPointerBytes = 8;
-inline constexpr std::uint32_t kGraphExtentEdgesPerClass = 8;
-inline constexpr std::uint8_t kGraphExtentClassUnknown = 0xffu;
+inline constexpr std::uint32_t kGraphRecordHeaderBytes =
+  vamana::graph_extent::kHeaderBytes;
+inline constexpr std::uint32_t kGraphPointerBytes =
+  vamana::graph_extent::kPointerBytes;
+inline constexpr std::uint32_t kGraphExtentEdgesPerClass =
+  vamana::graph_extent::kQuantumEdges;
+inline constexpr std::uint8_t kGraphExtentClassUnknown =
+  vamana::graph_extent::kUnknownLevel;
 
 #if defined(__CUDACC__)
 #define DVSTOR_GRAPH_RECORD_HD __host__ __device__ __forceinline__
 #else
 #define DVSTOR_GRAPH_RECORD_HD inline
 #endif
+
+DVSTOR_GRAPH_RECORD_HD bool is_full_record_avoidance_hit(
+    bool live_extent, bool partial_read, SnapshotState snapshot) {
+  return live_extent && partial_read && snapshot == SnapshotState::valid;
+}
+
+DVSTOR_GRAPH_RECORD_HD std::uint32_t full_record_avoidance_misses(
+    std::uint32_t logical_reads, std::uint32_t hits) {
+  return hits < logical_reads ? logical_reads - hits : 0;
+}
 
 DVSTOR_GRAPH_RECORD_HD std::uint16_t checksum16(
     const std::uint8_t* data, std::uint32_t bytes) {
@@ -124,63 +141,23 @@ DVSTOR_GRAPH_RECORD_HD bool required_live_extent_bytes(
   return true;
 }
 
-// Convert an immutable one-byte sidecar class into the one-shot RDMA length.
-// The final class is clamped to the physical record because capacities need
-// not be a multiple of eight (for example, R96 plus six provisional slots).
-// Unknown or malformed classes deliberately fall back to a full record.
 DVSTOR_GRAPH_RECORD_HD std::uint32_t graph_extent_bytes_for_class(
     std::uint8_t extent_class,
     std::uint32_t record_bytes,
     std::uint32_t graph_entry_capacity) {
-  if (record_bytes < kGraphRecordHeaderBytes ||
-      extent_class == kGraphExtentClassUnknown) {
-    return record_bytes;
-  }
-  const std::uint32_t maximum_class =
-    (graph_entry_capacity + kGraphExtentEdgesPerClass - 1) /
-      kGraphExtentEdgesPerClass;
-  if (extent_class > maximum_class) return record_bytes;
-  const std::uint32_t covered_edges =
-    static_cast<std::uint32_t>(extent_class) *
-      kGraphExtentEdgesPerClass;
-  const std::uint32_t bounded_edges =
-    covered_edges < graph_entry_capacity
-      ? covered_edges : graph_entry_capacity;
-  const std::uint32_t extent_bytes =
-    kGraphRecordHeaderBytes + bounded_edges * kGraphPointerBytes;
-  return extent_bytes < record_bytes ? extent_bytes : record_bytes;
+  return vamana::graph_extent::bytes_for_level(
+    extent_class, record_bytes, graph_entry_capacity);
 }
 
-// Derive the smallest eight-edge class that covers an exact counted prefix.
-// The helper intentionally rejects malformed byte counts instead of rounding
-// them: callers use the result to monotonically repair a performance hint,
-// never as an authority for record validity.
 DVSTOR_GRAPH_RECORD_HD std::uint8_t graph_extent_class_for_required_bytes(
     std::uint32_t required_bytes,
     std::uint32_t graph_entry_capacity) {
-  if (required_bytes < kGraphRecordHeaderBytes) {
-    return kGraphExtentClassUnknown;
-  }
-  const std::uint32_t payload_bytes =
-    required_bytes - kGraphRecordHeaderBytes;
-  if ((payload_bytes % kGraphPointerBytes) != 0) {
-    return kGraphExtentClassUnknown;
-  }
-  const std::uint32_t live_neighbors = payload_bytes / kGraphPointerBytes;
-  if (live_neighbors > graph_entry_capacity) {
-    return kGraphExtentClassUnknown;
-  }
-  const std::uint32_t extent_class =
-    (live_neighbors + kGraphExtentEdgesPerClass - 1u) /
-      kGraphExtentEdgesPerClass;
-  return extent_class < kGraphExtentClassUnknown
-    ? static_cast<std::uint8_t>(extent_class)
-    : kGraphExtentClassUnknown;
+  return vamana::graph_extent::level_for_required_bytes(
+    required_bytes, graph_entry_capacity);
 }
 
-// Device extent hints are stored four u8 classes per aligned u32 so a class
-// can be promoted with one CAS while preserving its three neighbours. These
-// pure helpers keep the byte packing and monotonic rule host-testable.
+// Four extent levels share one aligned word so adaptation can use one CAS
+// while preserving the other three nodes.
 DVSTOR_GRAPH_RECORD_HD std::uint8_t packed_graph_extent_class(
     std::uint32_t word, std::uint32_t byte_index) {
   if (byte_index >= sizeof(std::uint32_t)) {
@@ -190,28 +167,24 @@ DVSTOR_GRAPH_RECORD_HD std::uint8_t packed_graph_extent_class(
     word >> (byte_index * 8u));
 }
 
-DVSTOR_GRAPH_RECORD_HD bool promoted_graph_extent_word(
-    std::uint32_t observed_word,
-    std::uint32_t byte_index,
-    std::uint8_t requested_class,
-    std::uint32_t& promoted_word) {
-  promoted_word = observed_word;
-  if (byte_index >= sizeof(std::uint32_t) ||
-      requested_class == kGraphExtentClassUnknown) {
-    return false;
-  }
+DVSTOR_GRAPH_RECORD_HD vamana::graph_extent::AdaptationResult
+adapted_graph_extent_word(
+    std::uint32_t observed_word, std::uint32_t byte_index,
+    std::uint8_t observed_graph_class, std::uint32_t& adapted_word) {
+  adapted_word = observed_word;
+  if (byte_index >= sizeof(std::uint32_t)) return {};
   const std::uint32_t shift = byte_index * 8u;
   const std::uint32_t mask = 0xffu << shift;
-  const std::uint8_t observed_class =
+  const std::uint8_t cached_class =
     static_cast<std::uint8_t>((observed_word & mask) >> shift);
-  if (observed_class == kGraphExtentClassUnknown ||
-      requested_class <= observed_class) {
-    return false;
+  const auto transition = vamana::graph_extent::adapt_level(
+    cached_class, observed_graph_class);
+  if (transition.adaptation == vamana::graph_extent::Adaptation::none) {
+    return transition;
   }
-  promoted_word =
-    (observed_word & ~mask) |
-      (static_cast<std::uint32_t>(requested_class) << shift);
-  return true;
+  adapted_word = (observed_word & ~mask) |
+    (static_cast<std::uint32_t>(transition.level) << shift);
+  return transition;
 }
 
 // A checksum-valid dynamic graph record with another incarnation is not a

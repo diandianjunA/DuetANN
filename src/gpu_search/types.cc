@@ -61,6 +61,8 @@ TelemetrySnapshot Telemetry::snapshot() const {
       graph_extent_underhint_reads.load(std::memory_order_relaxed),
     .graph_extent_hint_promotions =
       graph_extent_hint_promotions.load(std::memory_order_relaxed),
+    .graph_full_record_avoidance_hits = graph_full_record_avoidance_hits.load(std::memory_order_relaxed),
+    .graph_full_record_avoidance_misses = graph_full_record_avoidance_misses.load(std::memory_order_relaxed),
     .expanded_parent_count =
       expanded_parent_count.load(std::memory_order_relaxed),
     .expanded_neighbor_count_sum =
@@ -324,6 +326,8 @@ void Telemetry::reset() {
   graph_extent_fallback_reads.store(0, std::memory_order_relaxed);
   graph_extent_underhint_reads.store(0, std::memory_order_relaxed);
   graph_extent_hint_promotions.store(0, std::memory_order_relaxed);
+  graph_full_record_avoidance_hits.store(0, std::memory_order_relaxed);
+  graph_full_record_avoidance_misses.store(0, std::memory_order_relaxed);
   expanded_parent_count.store(0, std::memory_order_relaxed);
   expanded_neighbor_count_sum.store(0, std::memory_order_relaxed);
   for (auto& bucket : expanded_degree_histogram) {

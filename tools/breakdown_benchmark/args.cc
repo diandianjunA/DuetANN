@@ -261,11 +261,18 @@ Args parse_args(int argc, char** argv) {
       args.write_delete_ratio = parse_double_argument(require_value("--write-delete-ratio"), "--write-delete-ratio");
     } else if (flag == "--mixed-delete-mode") {
       args.mixed_delete_mode = require_value("--mixed-delete-mode");
+    } else if (flag == "--hotspot-id-count") {
+      args.hotspot_id_count = parse_unsigned_argument<uint32_t>(
+        require_value("--hotspot-id-count"), "--hotspot-id-count");
     } else if (flag == "--dynamic-state-file") {
       args.dynamic_state_file = require_value("--dynamic-state-file");
     } else if (flag == "--seed-insert-count") {
       args.seed_insert_count = parse_unsigned_argument<size_t>(
         require_value("--seed-insert-count"), "--seed-insert-count");
+    } else if (flag == "--single-reader-write-cycles-per-query") {
+      args.single_reader_write_cycles_per_query = parse_unsigned_argument<size_t>(
+        require_value("--single-reader-write-cycles-per-query"),
+        "--single-reader-write-cycles-per-query");
     } else if (flag == "--maintenance-timeout-ms") {
       args.maintenance_timeout_ms = parse_unsigned_argument<size_t>(
         require_value("--maintenance-timeout-ms"), "--maintenance-timeout-ms");
@@ -310,10 +317,11 @@ Args parse_args(int argc, char** argv) {
   }
   if (args.mixed_mode != "probability" && args.mixed_mode != "fixed_threads" &&
       args.mixed_mode != "rate_limited" &&
-      args.mixed_mode != "write_rate_limited") {
+      args.mixed_mode != "write_rate_limited" &&
+      args.mixed_mode != "single_reader") {
     throw std::runtime_error(
-      "--mixed-mode must be probability, fixed_threads, rate_limited, or "
-      "write_rate_limited");
+      "--mixed-mode must be probability, fixed_threads, rate_limited, "
+      "write_rate_limited, or single_reader");
   }
   if (args.write_insert_ratio < 0.0 || args.write_upsert_ratio < 0.0 || args.write_delete_ratio < 0.0) {
     throw std::runtime_error("write mutation ratios must be >= 0");
@@ -384,19 +392,45 @@ Args parse_args(int argc, char** argv) {
     }
   }
   const bool use_time_mode = args.warmup_seconds > 0 || args.measure_seconds > 0;
-  if (use_time_mode && (args.warmup_seconds == 0 || args.measure_seconds == 0)) {
-    throw std::runtime_error("--warmup-seconds and --measure-seconds must both be > 0 when using time-based mode");
+  if (use_time_mode && args.measure_seconds == 0) {
+    throw std::runtime_error("--measure-seconds must be > 0 when warmup-seconds is > 0");
   }
   if (args.mixed_delete_mode != "base" && args.mixed_delete_mode != "inserted") {
     throw std::runtime_error("--mixed-delete-mode must be base or inserted");
   }
+  if (args.hotspot_id_count != 0 && args.mixed_delete_mode != "inserted") {
+    throw std::runtime_error("--hotspot-id-count requires --mixed-delete-mode inserted");
+  }
   if (args.mixed_delete_mode == "inserted") {
-    const size_t read_threads = static_cast<size_t>(std::llround(
-      static_cast<double>(args.client_threads) * args.read_ratio));
-    if (args.workload != "mixed" || args.recall_only ||
-        args.mixed_mode != "fixed_threads" || !use_time_mode) {
-      throw std::runtime_error(
-        "inserted-ID deletes require a timed, non-recall mixed workload in fixed_threads mode");
+    if (args.mixed_mode == "single_reader") {
+      if (args.workload != "mixed" || args.recall_only || use_time_mode ||
+          args.client_threads < 2 ||
+          args.single_reader_write_cycles_per_query == 0 ||
+          args.hotspot_id_count == 0 ||
+          args.seed_insert_count != args.hotspot_id_count ||
+          args.hotspot_id_count < args.client_threads - 1 ||
+          (args.measure_ops != 0 &&
+           args.single_reader_write_cycles_per_query >
+             args.hotspot_id_count / args.measure_ops)) {
+        throw std::runtime_error(
+          "single_reader requires fixed ops, at least one reader and one writer, "
+          "positive write cycles, seed-insert-count == hotspot-id-count >= writers, "
+          "and at most one replacement per hotspot slot");
+      }
+    } else {
+      const size_t read_threads = static_cast<size_t>(std::llround(
+        static_cast<double>(args.client_threads) * args.read_ratio));
+      if (args.workload != "mixed" || args.recall_only ||
+          (args.mixed_mode != "fixed_threads" &&
+           args.mixed_mode != "write_rate_limited") || !use_time_mode) {
+        throw std::runtime_error(
+          "inserted-ID deletes require a timed, non-recall mixed workload in "
+          "fixed_threads or write_rate_limited mode");
+      }
+      if (read_threads == 0 || read_threads > args.client_threads ||
+          args.client_threads - read_threads < 2) {
+        throw std::runtime_error("inserted-ID deletes require at least two write threads");
+      }
     }
     if (args.dynamic_state_file.empty()) {
       throw std::runtime_error("inserted-ID deletes require --dynamic-state-file");
@@ -406,10 +440,8 @@ Args parse_args(int argc, char** argv) {
       throw std::runtime_error(
         "inserted-ID deletes require positive insert/delete ratios and zero upsert ratio");
     }
-    if (read_threads == 0 || read_threads > args.client_threads ||
-        args.client_threads - read_threads < 2) {
-      throw std::runtime_error("inserted-ID deletes require at least two write threads");
-    }
+  } else if (args.mixed_mode == "single_reader") {
+    throw std::runtime_error("single_reader requires --mixed-delete-mode inserted");
   } else if (!args.dynamic_state_file.empty() || args.seed_insert_count != 0) {
     throw std::runtime_error(
       "--dynamic-state-file and --seed-insert-count require --mixed-delete-mode inserted");

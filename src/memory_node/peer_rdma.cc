@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 
 namespace {
 
@@ -620,10 +621,63 @@ void MemoryNode::poll_peer_send_cq() {
     return;
   }
   std::lock_guard<std::mutex> lock(peer_send_cq_mutex_);
-  Context::poll_send_cq(peer_send_wcs_.data(),
-                        static_cast<i32>(peer_send_wcs_.size()),
-                        peer_context_->get_send_cq(),
-                        [&](u64 wr_id) { handle_peer_send_completion(wr_id); });
+  const i32 count = ibv_poll_cq(
+    peer_context_->get_send_cq(), static_cast<i32>(peer_send_wcs_.size()),
+    peer_send_wcs_.data());
+  lib_assert(count >= 0, "Cannot poll peer completion queue");
+  for (i32 index = 0; index < count; ++index) {
+    const ibv_wc& completion = peer_send_wcs_[index];
+    if (completion.status != IBV_WC_SUCCESS) {
+      PeerPendingSend pending;
+      bool found = false;
+      {
+        std::lock_guard<std::mutex> completion_lock(peer_completion_mutex_);
+        const auto it = peer_pending_sends_.find(completion.wr_id);
+        if (it != peer_pending_sends_.end()) {
+          pending = it->second;
+          found = true;
+        }
+      }
+      std::cerr << "[storage-peer] failed WR"
+                << " self=" << storage_id_
+                << " status=" << completion.status
+                << " (" << ibv_wc_status_str(completion.status) << ")"
+                << " opcode=" << completion.opcode
+                << " vendor_err=" << completion.vendor_err
+                << " wr_id=" << completion.wr_id
+                << " found=" << found
+                << " target=" << pending.target_shard
+                << " qp=" << pending.target_qp_idx
+                << " thread=" << pending.thread_id
+                << " lane=" << pending.coroutine_id
+                << " async=" << pending.async
+                << " read_credit=" << pending.rdma_read_credit
+                << " read_count=" << pending.rdma_read_count
+                << " release_rpc_slot=" << pending.release_rpc_slot
+                << " rpc_slot=" << pending.rpc_slot_id
+                << " maintenance_epoch="
+                << pending.maintenance_context_owner.runtime_epoch
+                << " maintenance_token="
+                << pending.maintenance_context_owner.token;
+      if (found && pending.release_rpc_slot &&
+          pending.target_shard < num_storage_nodes_ &&
+          pending.rpc_slot_id < peer_rpc_runtime_.send_slots_per_peer) {
+        const auto* header = reinterpret_cast<
+          const service::storage_owner::PeerRpcHeader*>(
+            peer_rpc_runtime_.buffer.get_full_buffer() +
+            peer_rpc_async_send_offset(
+              pending.target_shard, pending.rpc_slot_id));
+        std::cerr << " rpc_type=" << header->type
+                  << " rpc_request_id=" << header->request_id
+                  << " rpc_items=" << header->item_count
+                  << " rpc_source=" << header->source_shard;
+      }
+      std::cerr << std::endl;
+      lib_assert(completion.status == IBV_WC_SUCCESS,
+                 "peer send completion failed");
+    }
+    handle_peer_send_completion(completion.wr_id);
+  }
 }
 
 bool MemoryNode::consume_peer_sync_completion(u64 wr_id) {
@@ -637,10 +691,11 @@ bool MemoryNode::consume_peer_sync_completion(u64 wr_id) {
 }
 
 void MemoryNode::wait_peer_sync_completion(u64 wr_id) {
+  const auto debug_started = std::chrono::steady_clock::now();
   if (peer_rpc_progress_running_.load(std::memory_order_acquire) &&
       !current_peer_rpc_progress_thread_) {
     std::unique_lock<std::mutex> lock(peer_completion_mutex_);
-    peer_completion_cv_.wait(lock, [&]() {
+    peer_completion_cv_.wait_for(lock, std::chrono::seconds(5), [&]() {
       return peer_sync_completions_.contains(wr_id) ||
              !peer_rpc_progress_running_.load(std::memory_order_acquire);
     });
@@ -651,6 +706,17 @@ void MemoryNode::wait_peer_sync_completion(u64 wr_id) {
     }
   }
   while (!consume_peer_sync_completion(wr_id)) {
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+        std::chrono::steady_clock::now() - debug_started >=
+          std::chrono::seconds(5)) {
+      static std::atomic<u32> debug_count{0};
+      if (debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
+        std::cerr << "[sync-send-wait-debug] self=" << storage_id_
+                  << " wr_id=" << wr_id
+                  << " progress_running=" << peer_rpc_progress_running_.load(
+                    std::memory_order_acquire) << std::endl;
+      }
+    }
     poll_peer_send_cq();
     std::this_thread::yield();
   }

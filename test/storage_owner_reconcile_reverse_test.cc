@@ -2,6 +2,9 @@
 #include <cassert>
 
 #include "memory_node/storage_owner_index/reconcile_reverse_policy.hh"
+#include "memory_node/storage_owner_index/robust_prune_policy.hh"
+#include "memory_node/storage_owner_index/snapshot_reuse_policy.hh"
+#include "memory_node/storage_owner_index/vector_snapshot_policy.hh"
 #include "memory_node/storage_owner_maintenance/cleanup_policy.hh"
 #include "vamana/vamana_node.hh"
 
@@ -38,12 +41,27 @@ void test_protocol_layout_is_additive() {
                 4);
   static_assert(static_cast<u32>(
                   ReconcileReverseOpKind::promote_stable_bridge) == 5);
+  static_assert(memory_node_storage_owner_index_detail::
+                  reconcile_reverse_coalesce_limit(256, false) == 256);
+  static_assert(memory_node_storage_owner_index_detail::
+                  reconcile_reverse_coalesce_limit(256, true) == 4096);
+  static_assert(memory_node_storage_owner_index_detail::
+                  reconcile_reverse_coalesce_limit(8192, true) == 8192);
   static_assert(!memory_node_storage_owner_index_detail::
                   reconcile_kind_needs_new_identity(
                     ReconcileReverseOpKind::remove_if_present));
   static_assert(memory_node_storage_owner_index_detail::
                   reconcile_kind_needs_new_identity(
                     ReconcileReverseOpKind::promote_stable_bridge));
+}
+
+void test_stale_removal_distinguishes_terminal_identity_from_retry() {
+  using memory_node_storage_owner_index_detail::reconcile_stale_removal_completed;
+  assert(!reconcile_stale_removal_completed(false, false, false, false));
+  assert(reconcile_stale_removal_completed(true, false, false, false));
+  assert(reconcile_stale_removal_completed(true, true, true, false));
+  assert(!reconcile_stale_removal_completed(true, true, false, false));
+  assert(!reconcile_stale_removal_completed(true, true, true, true));
 }
 
 void test_bounded_prune_rejection_is_a_terminal_ordinary_postcondition() {
@@ -96,10 +114,18 @@ void test_bounded_prune_rejection_is_a_terminal_ordinary_postcondition() {
 }
 
 void test_retired_target_completes_only_non_reachability_work() {
+  using memory_node_storage_owner_index_detail::ReconcileTargetAdmission;
+  using memory_node_storage_owner_index_detail::reconcile_target_admission;
   using memory_node_storage_owner_index_detail::
     reconcile_retired_target_result;
   using memory_node_storage_owner_index_detail::
     reconcile_reverse_postcondition_holds;
+  assert(reconcile_target_admission(false, false) ==
+         ReconcileTargetAdmission::malformed);
+  assert(reconcile_target_admission(true, false) ==
+         ReconcileTargetAdmission::retired);
+  assert(reconcile_target_admission(true, true) ==
+         ReconcileTargetAdmission::current);
   const RemotePtr target = pointer(0, 0x1000);
   const RemotePtr old_candidate = pointer(0, 0x2000);
   const RemotePtr new_candidate = pointer(1, 0x3000);
@@ -107,20 +133,30 @@ void test_retired_target_completes_only_non_reachability_work() {
   for (const ReconcileReverseOpKind kind : {
          ReconcileReverseOpKind::add,
          ReconcileReverseOpKind::remove_if_present,
+         ReconcileReverseOpKind::remove_provisional_if_present,
          ReconcileReverseOpKind::replace_or_add}) {
     const ReconcileReverseOp op = operation(
       kind, target,
       kind == ReconcileReverseOpKind::add ? RemotePtr{} : old_candidate,
-      kind == ReconcileReverseOpKind::remove_if_present
+      kind == ReconcileReverseOpKind::remove_if_present ||
+          kind == ReconcileReverseOpKind::remove_provisional_if_present
         ? RemotePtr{} : new_candidate);
     const auto result = reconcile_retired_target_result(op);
     assert(!result.stale);
     assert(reconcile_reverse_postcondition_holds(op, result));
   }
 
+  const auto release = operation(
+    ReconcileReverseOpKind::release_certificate_lease,
+    target, RemotePtr{}, new_candidate);
+  const auto released = reconcile_retired_target_result(release);
+  assert(!released.stale && released.accepted);
+  assert(reconcile_reverse_postcondition_holds(release, released));
+
   for (const ReconcileReverseOpKind kind : {
          ReconcileReverseOpKind::ensure_reachable,
-         ReconcileReverseOpKind::promote_stable_bridge}) {
+         ReconcileReverseOpKind::promote_stable_bridge,
+         ReconcileReverseOpKind::acquire_certificate_lease}) {
     const ReconcileReverseOp op = operation(
       kind, target, old_candidate, new_candidate);
     const auto result = reconcile_retired_target_result(op);
@@ -135,9 +171,8 @@ void test_stage2_backlink_plan_cleans_selected_and_unselected_bridges() {
   const RemotePtr final_first = pointer(1, 0x3000);
   const RemotePtr final_second = pointer(1, 0x4000);
 
-  // Prefer a protected parent that survived Stage2 pruning. The selected
-  // bridge is consumed by promotion; the unselected Stage1 bridge is the only
-  // member of the explicit cleanup barrier.
+  // The first global candidate is the mandatory parent, matching synchronous
+  // insertion. A Stage1 bridge is consumed only when that candidate selects it.
   const vec<RemotePtr> stage1{stage1_first, stage1_second};
   const vec<RemotePtr> partly_overlapping_final{
     final_first, stage1_second, final_second};
@@ -145,24 +180,21 @@ void test_stage2_backlink_plan_cleans_selected_and_unselected_bridges() {
     plan_stage2_backlink_reconciliation(
       span<const RemotePtr>{stage1},
       span<const RemotePtr>{partly_overlapping_final});
-  assert(plan.promotion_target == stage1_second);
-  assert(plan.promotion_consumes_stage1_bridge);
+  assert(plan.promotion_target == final_first);
+  assert(!plan.promotion_consumes_stage1_bridge);
   assert(plan.ordinary_stable_targets.size() == 2);
   assert(plan.obsolete_stage1_bridges ==
          vec<RemotePtr>{stage1_first});
 
-  // Even when no protected parent survives outgoing prune, promotion consumes
-  // a live Stage1 certificate first. This anchors the insertion in the old
-  // published graph instead of allowing a fresh-node dependency cycle.
   const vec<RemotePtr> disjoint_final{final_first, final_second};
   plan = memory_node_storage_owner_maintenance_detail::
     plan_stage2_backlink_reconciliation(
       span<const RemotePtr>{stage1}, span<const RemotePtr>{disjoint_final});
-  assert(plan.promotion_target == stage1_first);
-  assert(plan.promotion_consumes_stage1_bridge);
-  assert(plan.ordinary_stable_targets.size() == 2);
-  assert(plan.obsolete_stage1_bridges ==
-         vec<RemotePtr>{stage1_second});
+  assert(plan.promotion_target == final_first);
+  assert(!plan.promotion_consumes_stage1_bridge);
+  assert(plan.ordinary_stable_targets.size() == 1);
+  assert(plan.ordinary_stable_targets[0].target == final_second);
+  assert(plan.obsolete_stage1_bridges == stage1);
 
   // If all temporary parents retired before Stage2 ran, the same mandatory
   // stable operation is created at the first final parent without claiming a
@@ -212,6 +244,23 @@ void test_stage2_backlink_plan_cleans_selected_and_unselected_bridges() {
   assert(plan.obsolete_stage1_bridges.empty());
 }
 
+void test_promotion_uses_first_global_parent() {
+  using memory_node_storage_owner_maintenance_detail::
+    plan_stage2_backlink_reconciliation;
+  const RemotePtr dynamic_stage1 = pointer(0, 0x1000).with_incarnation(1);
+  const RemotePtr dynamic_final = pointer(1, 0x2000).with_incarnation(2);
+  const RemotePtr base_final = pointer(1, 0x3000);
+  const vec<RemotePtr> stage1{dynamic_stage1};
+  const vec<RemotePtr> final{dynamic_final, base_final};
+
+  const auto plan = plan_stage2_backlink_reconciliation(
+    span<const RemotePtr>{stage1}, span<const RemotePtr>{final});
+  assert(plan.promotion_target == dynamic_final);
+  assert(!plan.promotion_consumes_stage1_bridge);
+  assert(plan.ordinary_stable_targets.size() == 1);
+  assert(plan.ordinary_stable_targets[0].target == base_final);
+}
+
 void test_final_parent_eligibility_rejects_churn_and_dependency_cycles() {
   using memory_node_storage_owner_maintenance_detail::
     stage2_parent_is_stable;
@@ -231,6 +280,14 @@ void test_final_parent_eligibility_rejects_churn_and_dependency_cycles() {
   // satisfy reachability solely by pointing at one another.
   const u64 fresh_uncommitted = VamanaNode::make_header(5);
   assert(!stage2_parent_is_stable(fresh_uncommitted, false));
+
+  using memory_node_storage_owner_maintenance_detail::
+    stage2_promotion_certificate_matches;
+  assert(stage2_promotion_certificate_matches(false, true, false));
+  assert(!stage2_promotion_certificate_matches(true, true, false));
+  assert(stage2_promotion_certificate_matches(true, true, true));
+  assert(!stage2_promotion_certificate_matches(true, false, true));
+
 }
 
 void test_stage2_snapshot_wave_deduplicates_without_losing_task_order() {
@@ -1368,6 +1425,32 @@ void test_hot_parent_transaction_does_not_evict_earlier_promotion() {
     span<const RemotePtr>{stable}, span<const RemotePtr>{provisional}));
 }
 
+void test_atomic_cleanup_preserves_stable_and_replays_idempotently() {
+  const RemotePtr target = pointer(0, 0x1000);
+  const RemotePtr child = pointer(1, 0x2000);
+  const RemotePtr other = pointer(1, 0x3000);
+  const auto removal = operation(
+    ReconcileReverseOpKind::remove_provisional_if_present,
+    target, child, RemotePtr{}, 61);
+  vec<RemotePtr> stable{child};
+  vec<RemotePtr> provisional{child, other};
+  const auto never_prune = [](const vec<RemotePtr>&) -> vec<RemotePtr> {
+    assert(false);
+    return {};
+  };
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    const auto result =
+      memory_node_storage_owner_index_detail::reconcile_reverse_adjacency(
+        removal, true, true, true, true, 4, 2,
+        stable, provisional, never_prune);
+    assert(!result.stale && result.removed);
+    assert(memory_node_storage_owner_index_detail::
+      reconcile_reverse_postcondition_holds(removal, result));
+    assert((stable == vec<RemotePtr>{child}));
+    assert((provisional == vec<RemotePtr>{other}));
+  }
+}
+
 void test_receiver_orders_install_transaction_before_mandatory_audit() {
   using memory_node_storage_owner_index_detail::
     reconcile_reverse_target_execution_order;
@@ -1391,13 +1474,25 @@ void test_receiver_orders_install_transaction_before_mandatory_audit() {
     span<const size_t>{wire_order}, execution_order));
   assert((execution_order == vec<size_t>{1, 2, 0, 3}));
 
-  // Promotions cannot share a target transaction with the later removal
-  // phase. Rejecting the malformed request before mutation preserves the
-  // install/removal fault boundary.
-  vec<ReconcileReverseOp> malformed{
+  const vec<ReconcileReverseOp> transfer{
     wire_ops[0],
+    wire_ops[1],
     operation(ReconcileReverseOpKind::remove_if_present,
               target, first, RemotePtr{}, 55),
+    operation(ReconcileReverseOpKind::remove_provisional_if_present,
+              target, first, RemotePtr{}, 56),
+    wire_ops[3],
+  };
+  const vec<size_t> transfer_order{0, 1, 2, 3, 4};
+  assert(reconcile_reverse_target_execution_order(
+    span<const ReconcileReverseOp>{transfer},
+    span<const size_t>{transfer_order}, execution_order));
+  assert((execution_order == vec<size_t>{1, 2, 0, 4, 3}));
+
+  vec<ReconcileReverseOp> malformed{
+    wire_ops[0],
+    operation(ReconcileReverseOpKind::acquire_certificate_lease,
+              target, RemotePtr{}, first, 57),
   };
   const vec<size_t> malformed_order{0, 1};
   assert(!reconcile_reverse_target_execution_order(
@@ -1414,13 +1509,296 @@ void test_receiver_orders_install_transaction_before_mandatory_audit() {
   assert(execution_order == reverse_order);
 }
 
+void test_add_if_capacity_preserves_provisional_until_refinement() {
+  const RemotePtr target = pointer(0, 0x1000);
+  const RemotePtr first = pointer(0, 0x2000);
+  const RemotePtr second = pointer(0, 0x3000);
+  const RemotePtr child = pointer(1, 0x4000).with_incarnation(1);
+  vec<RemotePtr> stable{first, second};
+  vec<RemotePtr> provisional{child};
+  const auto op = operation(
+    ReconcileReverseOpKind::add_if_capacity, target, RemotePtr{}, child);
+  u32 prune_calls = 0;
+  const auto never_prune = [&](const vec<RemotePtr>&) -> vec<RemotePtr> {
+    ++prune_calls;
+    assert(false);
+    return {};
+  };
+  auto result = memory_node_storage_owner_index_detail::reconcile_reverse_adjacency(
+    op, true, true, true, false, 2, 3, stable, provisional, never_prune);
+  assert(!result.accepted && !result.stale);
+  assert((stable == vec<RemotePtr>{first, second}));
+  assert((provisional == vec<RemotePtr>{child}));
+  assert(prune_calls == 0);
+  assert(memory_node_storage_owner_index_detail::
+           reconcile_reverse_postcondition_holds(op, result));
+  assert(service::storage_owner::reconcile_reverse_op_valid(op));
+
+  stable.pop_back();
+  result = memory_node_storage_owner_index_detail::reconcile_reverse_adjacency(
+    op, true, true, true, false, 2, 3, stable, provisional, never_prune);
+  assert(result.accepted && !result.stale);
+  assert((stable == vec<RemotePtr>{first, child}));
+  assert(provisional.empty());
+  assert(prune_calls == 0);
+
+  stable = {first, second};
+  provisional = {child};
+  const auto refine = operation(
+    ReconcileReverseOpKind::add, target, RemotePtr{}, child);
+  const auto prune = [&](const vec<RemotePtr>&) {
+    return vec<RemotePtr>{first, child};
+  };
+  result = memory_node_storage_owner_index_detail::reconcile_reverse_adjacency(
+    refine, true, true, true, false, 2, 3, stable, provisional, prune);
+  assert(result.accepted && !result.stale);
+  assert((stable == vec<RemotePtr>{first, child}));
+  assert(provisional.empty());
+}
+
+void test_incremental_prune_only_revisits_new_candidates() {
+  struct Candidate {
+    RemotePtr pointer;
+    distance_t distance{};
+    size_t index{};
+    bool existing{};
+  };
+  const Candidate first{pointer(0, 0x1000), 1, 0, true};
+  const Candidate second{pointer(0, 0x2000), 100, 1, true};
+  const Candidate incoming{pointer(1, 0x3000), 50, 2, false};
+  const vec<Candidate> candidates{first, second, incoming};
+  const auto pointer_of = [](const Candidate& candidate) {
+    return candidate.pointer;
+  };
+  const auto distance_of = [](const Candidate& candidate) {
+    return candidate.distance;
+  };
+  vec<RemotePtr> selected;
+  vec<size_t> selected_indices;
+  bool prunes[3][3]{};
+  prunes[2][0] = true;
+  const auto pair_prunes = [&](const Candidate& candidate,
+                               const Candidate& retained, const distance_t) {
+    return prunes[candidate.index][retained.index];
+  };
+  memory_node_storage_owner_index_detail::
+    incremental_robust_pruned_sorted_by_pair_predicate(
+      span<const Candidate>{candidates},
+      [](const Candidate& candidate) { return candidate.existing; },
+      2, pointer_of, distance_of,
+      pair_prunes, selected, selected_indices);
+  assert((selected == vec<RemotePtr>{first.pointer, second.pointer}));
+
+  prunes[2][0] = false;
+  prunes[1][2] = true;
+  memory_node_storage_owner_index_detail::
+    incremental_robust_pruned_sorted_by_pair_predicate(
+      span<const Candidate>{candidates},
+      [](const Candidate& candidate) { return candidate.existing; },
+      2, pointer_of, distance_of,
+      pair_prunes, selected, selected_indices);
+  assert((selected == vec<RemotePtr>{first.pointer, incoming.pointer}));
+
+  prunes[1][2] = false;
+  memory_node_storage_owner_index_detail::
+    incremental_robust_pruned_sorted_by_pair_predicate(
+      span<const Candidate>{candidates},
+      [](const Candidate& candidate) { return candidate.existing; },
+      2, pointer_of, distance_of,
+      pair_prunes, selected, selected_indices);
+  assert((selected == vec<RemotePtr>{first.pointer, incoming.pointer}));
+}
+
+void test_snapshot_reuse_preserves_physical_identity() {
+  memory_node_storage_owner_index_detail::SnapshotReuseCache<u32> cache;
+  const RemotePtr original = pointer(1, 0x1000).with_incarnation(3);
+  const RemotePtr replacement = original.with_incarnation(4);
+  cache.reserve(2);
+  assert(cache.find(original) == nullptr);
+  cache.put(original, 42);
+  assert(cache.find(original) != nullptr && *cache.find(original) == 42);
+  cache.put(original, 43);
+  assert(*cache.find(original) == 42);
+  assert(cache.find(replacement) == nullptr);
+  cache.put(replacement, 7);
+  assert(*cache.find(original) == 42);
+  assert(*cache.find(replacement) == 7);
+  memory_node_storage_owner_index_detail::SnapshotReuseCache<u32> bounded(1);
+  bounded.put(original, 1);
+  bounded.put(replacement, 2);
+  assert(*bounded.find(original) == 1);
+  assert(bounded.find(replacement) == nullptr);
+}
+
+void test_certificate_parent_replacement_preserves_cleanup_state() {
+  using memory_node_storage_owner_maintenance_detail::
+    stage2_certificate_parent_candidates;
+  using memory_node_storage_owner_maintenance_detail::
+    stage2_certificate_release_parents;
+  using memory_node_storage_owner_maintenance_detail::
+    stage2_replace_certificate_parent;
+  using memory_node_storage_owner_maintenance_detail::
+    stage2_record_certificate_parent_attempt;
+  const RemotePtr retired = pointer(0, 0x1000);
+  const RemotePtr live = pointer(1, 0x2000);
+  const RemotePtr bridge = pointer(2, 0x3000);
+  const RemotePtr route = pointer(3, 0x4000);
+  const vec<RemotePtr> finals{live};
+  const vec<RemotePtr> bridges{bridge, retired};
+  const vec<RemotePtr> routes{route};
+  const auto candidates = stage2_certificate_parent_candidates(
+    span<const RemotePtr>{bridges}, span<const RemotePtr>{finals}, retired,
+    span<const RemotePtr>{routes});
+  assert((candidates == vec<RemotePtr>{retired, live, bridge, route}));
+
+  RemotePtr current = retired;
+  vec<RemotePtr> replaced;
+  stage2_replace_certificate_parent(RemotePtr{}, current, replaced);
+  assert(current == retired && replaced.empty());
+  stage2_replace_certificate_parent(live, current, replaced);
+  assert(current == live && replaced == vec<RemotePtr>{retired});
+  stage2_replace_certificate_parent(bridge, current, replaced);
+  assert(current == bridge &&
+         (replaced == vec<RemotePtr>{retired, live}));
+  assert((stage2_certificate_release_parents(
+            current, span<const RemotePtr>{replaced}) ==
+          vec<RemotePtr>{retired, live, bridge}));
+  stage2_replace_certificate_parent(retired, current, replaced);
+  assert(current == retired &&
+         (replaced == vec<RemotePtr>{live, bridge}));
+  assert(memory_node_storage_owner_maintenance_detail::
+           stage2_stale_certificate_release_required(
+             true, RemotePtr{}, span<const RemotePtr>{}));
+  assert(memory_node_storage_owner_maintenance_detail::
+           stage2_stale_certificate_release_required(
+             false, RemotePtr{}, span<const RemotePtr>{replaced}));
+  assert(memory_node_storage_owner_maintenance_detail::
+           stage2_stale_certificate_release_required(
+             false, current, span<const RemotePtr>{}));
+  assert(!memory_node_storage_owner_maintenance_detail::
+           stage2_stale_certificate_release_required(
+             false, RemotePtr{}, span<const RemotePtr>{}));
+
+  vec<RemotePtr> uncertain_attempts;
+  stage2_record_certificate_parent_attempt(retired, uncertain_attempts);
+  stage2_record_certificate_parent_attempt(retired, uncertain_attempts);
+  assert(uncertain_attempts == vec<RemotePtr>{retired});
+  assert((stage2_certificate_release_parents(
+            RemotePtr{}, span<const RemotePtr>{uncertain_attempts}) ==
+          vec<RemotePtr>{retired}));
+  assert(memory_node_storage_owner_maintenance_detail::
+           stage2_stale_certificate_release_required(
+             false, RemotePtr{}, span<const RemotePtr>{uncertain_attempts}));
+  RemotePtr unconfirmed = retired;
+  stage2_record_certificate_parent_attempt(unconfirmed, uncertain_attempts);
+  unconfirmed.reset();
+  stage2_replace_certificate_parent(live, unconfirmed, uncertain_attempts);
+  assert(unconfirmed == live);
+  assert((stage2_certificate_release_parents(
+            unconfirmed, span<const RemotePtr>{uncertain_attempts}) ==
+          vec<RemotePtr>{retired, live}));
+
+  const u64 stable = VamanaNode::make_header(
+    3, VamanaNode::HEADER_CENTROID_ACCOUNTED);
+  const u64 retiring = stable | VamanaNode::HEADER_RETIRING;
+  const u64 frozen = stable | VamanaNode::HEADER_STAGE2_FROZEN;
+  assert(!memory_node_storage_owner_maintenance_detail::
+           stage2_parent_is_stable(retiring, false));
+  assert(memory_node_storage_owner_maintenance_detail::
+           stage2_retired_target_cleanup_allowed(retiring));
+  assert(memory_node_storage_owner_maintenance_detail::
+           stage2_retired_target_cleanup_allowed(
+             stable | VamanaNode::HEADER_DELETED));
+  assert(!memory_node_storage_owner_maintenance_detail::
+           stage2_retired_target_cleanup_allowed(frozen));
+  assert(!memory_node_storage_owner_maintenance_detail::
+           certificate_release_can_bypass_target_lock(stable));
+  assert(!memory_node_storage_owner_maintenance_detail::
+           certificate_release_can_bypass_target_lock(frozen));
+  assert(memory_node_storage_owner_maintenance_detail::
+           certificate_release_can_bypass_target_lock(retiring));
+  assert(memory_node_storage_owner_maintenance_detail::
+           certificate_release_can_bypass_target_lock(
+             stable | VamanaNode::HEADER_DELETED));
+  assert(memory_node_storage_owner_maintenance_detail::
+           certificate_release_can_bypass_target_lock(
+             VamanaNode::HEADER_PROVISIONAL |
+             VamanaNode::HEADER_NODE_LOCK));
+}
+
+void test_certificate_child_reclaim_requires_terminal_identity() {
+  using memory_node_storage_owner_index_detail::CertificateLeaseChildState;
+  using memory_node_storage_owner_index_detail::StableNodeSnapshotState;
+  using memory_node_storage_owner_index_detail::certificate_lease_child_state;
+  const u64 deleted = VamanaNode::make_header(7, VamanaNode::HEADER_DELETED);
+  const u64 locked = deleted | VamanaNode::HEADER_NODE_LOCK;
+  assert(certificate_lease_child_state(
+    false, false, false, StableNodeSnapshotState::retryable, 0) ==
+    CertificateLeaseChildState::terminal);
+  assert(certificate_lease_child_state(
+    true, true, true, StableNodeSnapshotState::stable, deleted) ==
+    CertificateLeaseChildState::terminal);
+  assert(certificate_lease_child_state(
+    true, false, false, StableNodeSnapshotState::terminal, 0) ==
+    CertificateLeaseChildState::terminal);
+  assert(certificate_lease_child_state(
+    true, false, false, StableNodeSnapshotState::stable, deleted) ==
+    CertificateLeaseChildState::terminal);
+  assert(certificate_lease_child_state(
+    true, true, false, StableNodeSnapshotState::stable, 0) ==
+    CertificateLeaseChildState::live);
+  assert(certificate_lease_child_state(
+    true, true, false, StableNodeSnapshotState::retryable, 0) ==
+    CertificateLeaseChildState::live);
+  assert(certificate_lease_child_state(
+    true, false, false, StableNodeSnapshotState::retryable, locked) ==
+    CertificateLeaseChildState::retryable);
+  assert(certificate_lease_child_state(
+    true, false, false, StableNodeSnapshotState::stable, 0) ==
+    CertificateLeaseChildState::retryable);
+}
+
+void test_refinement_lock_conflict_is_retryable_per_operation() {
+  using memory_node_storage_owner_index_detail::
+    reconcile_reverse_refinement_retryable;
+  using service::storage_owner::ReconcileReverseResult;
+  const RemotePtr target = pointer(0, 0x1000);
+  const RemotePtr child = pointer(1, 0x2000).with_incarnation(1);
+  const auto op = operation(
+    ReconcileReverseOpKind::refine_add, target, RemotePtr{}, child, 91);
+  ReconcileReverseResult result{.placement_sequence = op.placement_sequence,
+                                .stale = 1};
+  assert(reconcile_reverse_refinement_retryable(op, result));
+  assert(!memory_node_storage_owner_index_detail::
+           reconcile_reverse_postcondition_holds(op, result));
+  result.stale = 0;
+  assert(!reconcile_reverse_refinement_retryable(op, result));
+  assert(memory_node_storage_owner_index_detail::
+           reconcile_reverse_postcondition_holds(op, result));
+  result.stale = 1;
+  result.accepted = 1;
+  assert(!reconcile_reverse_refinement_retryable(op, result));
+  const auto acquire = operation(
+    ReconcileReverseOpKind::acquire_certificate_lease,
+    target, RemotePtr{}, child, 92);
+  result = ReconcileReverseResult{.placement_sequence = 92, .stale = 1};
+  assert(!reconcile_reverse_refinement_retryable(acquire, result));
+}
+
 }  // namespace
 
 int main() {
+  test_refinement_lock_conflict_is_retryable_per_operation();
+  test_certificate_child_reclaim_requires_terminal_identity();
+  test_certificate_parent_replacement_preserves_cleanup_state();
+  test_snapshot_reuse_preserves_physical_identity();
+  test_incremental_prune_only_revisits_new_candidates();
+  test_add_if_capacity_preserves_provisional_until_refinement();
   test_protocol_layout_is_additive();
   test_bounded_prune_rejection_is_a_terminal_ordinary_postcondition();
   test_retired_target_completes_only_non_reachability_work();
   test_stage2_backlink_plan_cleans_selected_and_unselected_bridges();
+  test_promotion_uses_first_global_parent();
   test_final_parent_eligibility_rejects_churn_and_dependency_cycles();
   test_stage2_snapshot_wave_deduplicates_without_losing_task_order();
   test_promotion_retry_skips_dead_first_sealed_neighbor();
@@ -1453,6 +1831,8 @@ int main() {
   test_final_target_audit_rejects_evicted_mandatory_certificate();
   test_hot_parent_prune_preserves_every_mandatory_promotion();
   test_hot_parent_transaction_does_not_evict_earlier_promotion();
+  test_atomic_cleanup_preserves_stable_and_replays_idempotently();
   test_receiver_orders_install_transaction_before_mandatory_audit();
+  test_stale_removal_distinguishes_terminal_identity_from_retry();
   return 0;
 }

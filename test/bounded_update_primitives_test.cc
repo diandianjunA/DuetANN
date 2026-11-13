@@ -1082,6 +1082,17 @@ void test_stage2_rebase_preserves_post_stage1_reverse_edge() {
   assert(rebased.size() == 2);
   assert(rebased[0] == globally_selected);
   assert(rebased[1] == concurrent_reverse);
+
+  const vec<RemotePtr> additions =
+    memory_node_storage_owner_maintenance_detail::
+      select_stage2_rebase_additions(
+        span<const RemotePtr>{global_neighbors.data(), global_neighbors.size()},
+        span<const RemotePtr>{stage1_neighbors.data(),
+                              stage1_neighbors.size()},
+        span<const RemotePtr>{observed_neighbors.data(),
+                              observed_neighbors.size()});
+  assert(additions.size() == 1);
+  assert(additions[0] == concurrent_reverse);
 }
 
 void test_cleanup_identity_fences_both_reused_slots() {

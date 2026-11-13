@@ -1,12 +1,25 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "common/types.hh"
+#include "memory_node/storage_owner_index/robust_prune_policy.hh"
 #include "remote_pointer.hh"
 #include "service/storage_owner_protocol.hh"
 
 namespace memory_node_storage_owner_index_detail {
+
+inline constexpr bool reconcile_kind_is_ordinary_add(
+    service::storage_owner::ReconcileReverseOpKind kind) {
+  return kind == service::storage_owner::ReconcileReverseOpKind::add ||
+    kind == service::storage_owner::ReconcileReverseOpKind::refine_add;
+}
+
+inline constexpr size_t reconcile_reverse_coalesce_limit(
+    size_t configured, bool refinement_only) {
+  return refinement_only ? std::max(configured, size_t{4096}) : configured;
+}
 
 inline constexpr bool reconcile_kind_needs_new_identity(
     service::storage_owner::ReconcileReverseOpKind kind) {
@@ -18,6 +31,8 @@ inline constexpr bool reconcile_kind_needs_new_identity(
       return false;
     case ReconcileReverseOpKind::replace_or_add:
     case ReconcileReverseOpKind::add:
+    case ReconcileReverseOpKind::refine_add:
+    case ReconcileReverseOpKind::add_if_capacity:
     case ReconcileReverseOpKind::ensure_reachable:
     case ReconcileReverseOpKind::promote_stable_bridge:
     case ReconcileReverseOpKind::acquire_certificate_lease:
@@ -30,6 +45,13 @@ inline bool reconcile_contains(const vec<RemotePtr>& neighbors,
                                const RemotePtr candidate) {
   return std::find(neighbors.begin(), neighbors.end(), candidate) !=
          neighbors.end();
+}
+
+inline bool reconcile_stale_removal_completed(
+    bool old_present, bool pointer_valid, bool snapshot_read,
+    bool identity_matches) {
+  return old_present &&
+    (!pointer_valid || (snapshot_read && !identity_matches));
 }
 
 // An ordinary reverse edge is a bounded-degree proposal. RobustPrune may
@@ -51,6 +73,8 @@ inline bool reconcile_reverse_postcondition_holds(
     case ReconcileReverseOpKind::remove_provisional_if_present:
       return result.removed != 0;
     case ReconcileReverseOpKind::add:
+    case ReconcileReverseOpKind::refine_add:
+    case ReconcileReverseOpKind::add_if_capacity:
       return true;
     case ReconcileReverseOpKind::ensure_reachable:
     case ReconcileReverseOpKind::release_certificate_lease:
@@ -61,6 +85,16 @@ inline bool reconcile_reverse_postcondition_holds(
         (op.old_candidate_raw == 0 || result.removed != 0);
   }
   return false;
+}
+
+inline bool reconcile_reverse_refinement_retryable(
+    const service::storage_owner::ReconcileReverseOp& op,
+    const service::storage_owner::ReconcileReverseResult& result) {
+  return static_cast<service::storage_owner::ReconcileReverseOpKind>(op.kind) ==
+      service::storage_owner::ReconcileReverseOpKind::refine_add &&
+    result.placement_sequence == op.placement_sequence &&
+    result.accepted == 0 && result.replaced == 0 && result.removed == 0 &&
+    result.stale == 1 && result.reserved == 0;
 }
 
 // Per-operation results describe the adjacency immediately after that
@@ -178,6 +212,19 @@ inline bool preserve_reconcile_mandatory_candidates(
   return true;
 }
 
+enum class ReconcileTargetAdmission : u8 {
+  malformed,
+  retired,
+  current,
+};
+
+inline ReconcileTargetAdmission reconcile_target_admission(
+    bool pointer_addressable, bool current_incarnation) {
+  if (!pointer_addressable) return ReconcileTargetAdmission::malformed;
+  return current_incarnation ? ReconcileTargetAdmission::current
+                             : ReconcileTargetAdmission::retired;
+}
+
 // A tagged target whose physical incarnation has already retired cannot
 // contain any edge owned by that incarnation.  Ordinary reverse additions
 // are only bounded-degree proposals, so losing their target is a completed
@@ -194,6 +241,8 @@ reconcile_retired_target_result(
   };
   switch (static_cast<ReconcileReverseOpKind>(op.kind)) {
     case ReconcileReverseOpKind::add:
+    case ReconcileReverseOpKind::refine_add:
+    case ReconcileReverseOpKind::add_if_capacity:
     case ReconcileReverseOpKind::release_certificate_lease:
       result.accepted = 1;
       break;
@@ -316,6 +365,7 @@ service::storage_owner::ReconcileReverseResult reconcile_reverse_neighbors(
       return result;
 
     case ReconcileReverseOpKind::add:
+    case ReconcileReverseOpKind::refine_add:
       if (!old_candidate.is_null() || new_candidate.is_null() ||
           !new_identity_live || new_candidate == RemotePtr{op.target_raw}) {
         return stale();
@@ -325,6 +375,18 @@ service::storage_owner::ReconcileReverseResult reconcile_reverse_neighbors(
         return result;
       }
       add_new();
+      return result;
+
+    case ReconcileReverseOpKind::add_if_capacity:
+      if (!old_candidate.is_null() || new_candidate.is_null() ||
+          !new_identity_live || new_candidate == RemotePtr{op.target_raw}) {
+        return stale();
+      }
+      if (new_present) {
+        result.accepted = 1;
+      } else if (neighbors.size() < degree_limit) {
+        add_new();
+      }
       return result;
 
     case ReconcileReverseOpKind::replace_or_add: {
@@ -478,19 +540,33 @@ service::storage_owner::ReconcileReverseResult reconcile_reverse_adjacency(
 
   const bool observed_old = old_present();
   const auto add_stable = [&](bool force_prune) {
+    const auto debug = [&](size_t before, bool pruned) {
+      static std::atomic<u32> count{0};
+      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+          count.fetch_add(1, std::memory_order_relaxed) < 16) {
+        std::cerr << "[direct-prune-debug] target=" << op.target_raw
+                  << " before=" << before << " after=" << stable.size()
+                  << " candidate=" << new_candidate.raw_address
+                  << " accepted=" << static_cast<u32>(result.accepted)
+                  << " pruned=" << pruned << std::endl;
+      }
+    };
     erase_all(provisional, new_candidate);
     if (new_stable()) {
       result.accepted = 1;
+      debug(stable.size(), false);
       return;
     }
     if (!force_prune && stable.size() < degree_limit) {
+      const size_t before = stable.size();
       stable.push_back(new_candidate);
       result.accepted = 1;
+      debug(before, false);
       return;
     }
     vec<RemotePtr> candidates = stable;
     candidates.push_back(new_candidate);
-    vec<RemotePtr> selected = robust_prune(candidates);
+    vec<RemotePtr> selected = invoke_reverse_prune(robust_prune, candidates, stable.size());
     vec<RemotePtr> bounded;
     bounded.reserve(std::min<size_t>(degree_limit, selected.size()));
     for (const RemotePtr candidate : selected) {
@@ -505,6 +581,7 @@ service::storage_owner::ReconcileReverseResult reconcile_reverse_adjacency(
     }
     stable = std::move(bounded);
     result.accepted = new_stable() ? 1 : 0;
+    debug(candidates.size(), true);
   };
   const auto force_stable = [&]() {
     add_stable(false);
@@ -534,11 +611,25 @@ service::storage_owner::ReconcileReverseResult reconcile_reverse_adjacency(
       return result;
 
     case ReconcileReverseOpKind::add:
+    case ReconcileReverseOpKind::refine_add:
       if (!old_candidate.is_null() || new_candidate.is_null() ||
           new_candidate == target || !new_identity_stable) {
         return stale_result();
       }
       add_stable(false);
+      return result;
+
+    case ReconcileReverseOpKind::add_if_capacity:
+      if (!old_candidate.is_null() || new_candidate.is_null() ||
+          new_candidate == target || !new_identity_stable) {
+        return stale_result();
+      }
+      if (new_stable()) {
+        erase_all(provisional, new_candidate);
+        result.accepted = 1;
+      } else if (stable.size() < degree_limit) {
+        add_stable(false);
+      }
       return result;
 
     case ReconcileReverseOpKind::replace_or_add: {
@@ -671,9 +762,14 @@ service::storage_owner::ReconcileReverseResult reconcile_reverse_adjacency(
       result.replaced = observed_old && result.accepted ? 1 : 0;
       return result;
     }
+    case ReconcileReverseOpKind::remove_provisional_if_present:
+      if (old_candidate.is_null()) return stale_result();
+      erase_all(provisional, old_candidate);
+      result.removed = 1;
+      return result;
+
     case ReconcileReverseOpKind::acquire_certificate_lease:
     case ReconcileReverseOpKind::release_certificate_lease:
-    case ReconcileReverseOpKind::remove_provisional_if_present:
       return stale_result();
   }
   return stale_result();
@@ -692,16 +788,16 @@ inline size_t reconcile_reverse_add_run_end(
   if (begin >= op_indices.size()) return begin;
   lib_assert(op_indices[begin] < ops.size(),
              "reverse add run index exceeds operation batch");
-  if (static_cast<ReconcileReverseOpKind>(
-        ops[op_indices[begin]].kind) != ReconcileReverseOpKind::add) {
+  if (!reconcile_kind_is_ordinary_add(
+        static_cast<ReconcileReverseOpKind>(ops[op_indices[begin]].kind))) {
     return begin;
   }
   size_t end = begin + 1;
   while (end < op_indices.size()) {
     lib_assert(op_indices[end] < ops.size(),
                "reverse add run index exceeds operation batch");
-    if (static_cast<ReconcileReverseOpKind>(
-          ops[op_indices[end]].kind) != ReconcileReverseOpKind::add) {
+    if (!reconcile_kind_is_ordinary_add(
+          static_cast<ReconcileReverseOpKind>(ops[op_indices[end]].kind))) {
       break;
     }
     ++end;
@@ -738,18 +834,31 @@ inline bool reconcile_reverse_target_execution_order(
     return true;
   }
 
+  // One locked reachability-transfer transaction has three ordered planes:
+  // ordinary graph edits, mandatory stable certificates, then provisional
+  // cleanup. Keeping the final plane inside the same lock closes the old
+  // install/removal/release gap without permitting unrelated lease operations.
   for (const size_t op_index : op_indices) {
     const auto kind = static_cast<ReconcileReverseOpKind>(ops[op_index].kind);
-    if (kind == ReconcileReverseOpKind::add ||
-        kind == ReconcileReverseOpKind::replace_or_add) {
+    if (reconcile_kind_is_ordinary_add(kind) ||
+        kind == ReconcileReverseOpKind::add_if_capacity ||
+        kind == ReconcileReverseOpKind::replace_or_add ||
+        kind == ReconcileReverseOpKind::remove_if_present) {
       execution_order.push_back(op_index);
-    } else if (kind != ReconcileReverseOpKind::promote_stable_bridge) {
+    } else if (kind != ReconcileReverseOpKind::promote_stable_bridge &&
+               kind != ReconcileReverseOpKind::remove_provisional_if_present) {
       return false;
     }
   }
   for (const size_t op_index : op_indices) {
     if (static_cast<ReconcileReverseOpKind>(ops[op_index].kind) ==
         ReconcileReverseOpKind::promote_stable_bridge) {
+      execution_order.push_back(op_index);
+    }
+  }
+  for (const size_t op_index : op_indices) {
+    if (static_cast<ReconcileReverseOpKind>(ops[op_index].kind) ==
+        ReconcileReverseOpKind::remove_provisional_if_present) {
       execution_order.push_back(op_index);
     }
   }
@@ -805,8 +914,8 @@ void reconcile_reverse_add_batch(
     const RemotePtr candidate{op.new_candidate_raw};
     if (!target_stable || degree_limit == 0 || protected_limit == 0 ||
         op.placement_sequence == 0 || op.target_raw != target.raw_address ||
-        static_cast<ReconcileReverseOpKind>(op.kind) !=
-          ReconcileReverseOpKind::add ||
+        !reconcile_kind_is_ordinary_add(
+          static_cast<ReconcileReverseOpKind>(op.kind)) ||
         op.old_candidate_raw != 0 || candidate.is_null() ||
         candidate == target || new_identity_stable[index] == 0) {
       result.stale = 1;
@@ -828,7 +937,7 @@ void reconcile_reverse_add_batch(
     if (candidates.size() <= degree_limit) {
       stable = std::move(candidates);
     } else {
-      vec<RemotePtr> selected = robust_prune(candidates);
+      vec<RemotePtr> selected = invoke_reverse_prune(robust_prune, candidates, stable.size());
       vec<RemotePtr> bounded;
       bounded.reserve(std::min<size_t>(degree_limit, selected.size()));
       for (const RemotePtr candidate : selected) {

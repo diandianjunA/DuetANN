@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -22,34 +23,35 @@ enum class Stage2ReconcileBarrier : std::uint8_t {
 };
 
 // Ordinary backlinks may RobustPrune the same hot parent selected as another
-// insertion's mandatory reachability holder. Install ordinary mutations and
-// mandatory promotions in one per-target transaction, with every ordinary op
-// ordered before every promotion op for that target. The receiver audits all
-// mandatory certificates against the transaction's final adjacency before it
-// ACKs. Per-item removal and release barriers then retire temporary bridges
-// and unpin certificates without rebuilding sibling item state.
+// insertion's mandatory reachability holder. Every ordinary op precedes the
+// mandatory certificate for that target, and the receiver audits the final
+// adjacency before ACKing. The legacy promotion also removes provisional edges
+// in this transaction. LeaseMerge retains its lease through provisional cleanup
+// and releases it only after placement and centroid publication complete.
 [[nodiscard]] constexpr Stage2ReconcileBarrier
 stage2_reconcile_first_barrier() noexcept {
   return Stage2ReconcileBarrier::install;
 }
 
 [[nodiscard]] constexpr Stage2ReconcileBarrier
-stage2_reconcile_next_barrier(Stage2ReconcileBarrier barrier) noexcept {
-  switch (barrier) {
-    case Stage2ReconcileBarrier::install:
-      return Stage2ReconcileBarrier::removal;
-    case Stage2ReconcileBarrier::removal:
-      return Stage2ReconcileBarrier::release;
-    case Stage2ReconcileBarrier::release:
-    case Stage2ReconcileBarrier::none:
-      return Stage2ReconcileBarrier::none;
+stage2_reconcile_next_barrier(Stage2ReconcileBarrier barrier,
+                              bool lease_merge) noexcept {
+  if (barrier == Stage2ReconcileBarrier::install) {
+    return lease_merge ? Stage2ReconcileBarrier::removal
+                       : Stage2ReconcileBarrier::none;
   }
   return Stage2ReconcileBarrier::none;
 }
 
-// The outer Stage2 tracker remains in prune_ready while each item has its own
-// outstanding transport barriers and placement suffix. Complete items release
-// their search lane and never wait for sibling item RPCs.
+[[nodiscard]] constexpr service::storage_owner::ReconcileReverseOpKind
+stage2_reconcile_certificate_kind(bool lease_merge) noexcept {
+  return lease_merge
+    ? service::storage_owner::ReconcileReverseOpKind::acquire_certificate_lease
+    : service::storage_owner::ReconcileReverseOpKind::promote_stable_bridge;
+}
+
+// The outer Stage2 tracker remains in prune_ready while the context has an
+// outstanding transport barrier or an independently finishing placement item.
 enum class Stage2FinalizeSubphase : std::uint8_t {
   prepare,
   install_wait,
@@ -85,6 +87,33 @@ stage2_reconcile_wait_subphase(Stage2ReconcileBarrier barrier) noexcept {
 // original per-target order within each install/removal barrier while
 // allowing independent targets to be packed.
 using Stage2ReconcileOp = service::storage_owner::ReconcileReverseOp;
+
+[[nodiscard]] constexpr bool stage2_mandatory_certificate_op(
+    Stage2ReconcileOp op) noexcept {
+  const auto kind = static_cast<service::storage_owner::ReconcileReverseOpKind>(
+    op.kind);
+  return kind == service::storage_owner::ReconcileReverseOpKind::
+      promote_stable_bridge ||
+    kind == service::storage_owner::ReconcileReverseOpKind::
+      acquire_certificate_lease;
+}
+
+inline void order_stage2_install_ops(std::vector<Stage2ReconcileOp>& ops) {
+  const auto provisional_cleanup = [](Stage2ReconcileOp op) {
+    return op.kind == static_cast<std::uint32_t>(
+      service::storage_owner::ReconcileReverseOpKind::
+        remove_provisional_if_present);
+  };
+  const auto ordinary_end = std::stable_partition(
+    ops.begin(), ops.end(), [&](Stage2ReconcileOp op) {
+      return !stage2_mandatory_certificate_op(op) && !provisional_cleanup(op);
+    });
+  std::stable_partition(ordinary_end, ops.end(),
+    [](Stage2ReconcileOp op) {
+      return stage2_mandatory_certificate_op(op);
+    });
+}
+
 inline std::optional<std::vector<std::vector<Stage2ReconcileOp>>>
 pack_stage2_reconcile_target_runs(
     std::span<const Stage2ReconcileOp> ops, std::size_t wire_capacity) {
@@ -136,7 +165,7 @@ struct Stage2ReconcileChunk {
   }
 };
 
-// One item-local, bounded reconciliation barrier. The exact operation
+// One context-wide, bounded reconciliation barrier. The exact operation
 // payload remains immutable from the first post through every transport retry.
 // Offsets, rather than pointers, keep chunks valid if the payload vector grows
 // while the barrier is initially assembled. A fresh epoch fences a late ACK

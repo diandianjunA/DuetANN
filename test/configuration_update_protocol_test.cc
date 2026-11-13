@@ -188,6 +188,34 @@ int main() {
   assert(decoupled_progression.gpu_query_beam_merge_policy == "stable-run");
   assert(decoupled_progression.decoupled_gpu_rdma_search_progression_enabled());
 
+  assert(decoupled_progression.gpu_exact_frontier_early_issue);
+  assert(coupled_updates.storage_owner_stage2_graph_issue_width == 1);
+  assert(!coupled_updates.storage_owner_stage2_score_many);
+  assert(!coupled_updates.storage_owner_stage2_home_rpc_combining);
+  assert(!coupled_updates.storage_owner_stage2_split_plane);
+  assert(!coupled_updates.storage_owner_lease_merge);
+  assert(coupled_updates.storage_owner_repair_deadline_ms == 0);
+
+  expect_configuration_rejected([] {
+    (void)make_config_with_extra({
+      "--storage-owner-stage2-score-many", "false"});
+  });
+  expect_configuration_rejected([] {
+    (void)make_config_with_extra({
+      "--storage-owner-stage2-graph-issue-width", "1"});
+  });
+  expect_configuration_rejected([] {
+    (void)make_config_with_extra({
+      "--storage-owner-repair-deadline-ms", "0"});
+  });
+  expect_configuration_rejected([] {
+    (void)make_config_with_extra({
+      "--gpu-rdma-search-progression-mode", "decoupled",
+      "--gpu-graph-commit-width", "16",
+      "--gpu-graph-issue-width", "32",
+      "--gpu-exact-frontier-early-issue", "false"});
+  });
+
   // Formal contribution modes reject an explicitly requested half-enabled
   // lower-level configuration. Manual mode above remains available for the
   // static-only and other engineering ablations.
@@ -218,21 +246,19 @@ int main() {
 
   assert(default_config.storage_owner_stage2_home_rpc_combining);
   const auto direct_home_rpc_config =
-    make_config(false, false, {}, {}, {}, "false");
+    make_config(false, false, {}, {}, {}, "false", {}, {}, {}, {}, "manual");
   assert(!direct_home_rpc_config.storage_owner_stage2_home_rpc_combining);
 
   // Stage2 is mandatory for the sole supported update pipeline.
   assert(default_config.storage_owner_maintenance_workers > 0);
 
-  // Both Phase-2 throughput controllers default to fully disabled.
+  // Backlog-budget controls default off; decoupled supplies its repair target.
   assert(default_config.storage_owner_stage2_budget_backlog_low == 0);
   assert(default_config.storage_owner_stage2_budget_backlog_high == 0);
   assert(default_config.storage_owner_stage2_budget_max_expansions == 0);
   assert(default_config.storage_owner_stage2_budget_max_candidate_visits == 0);
-  assert(default_config.storage_owner_flow_control_backlog_low == 0);
-  assert(default_config.storage_owner_flow_control_backlog_high == 0);
+  assert(default_config.storage_owner_repair_deadline_ms == 1000);
   assert(default_config.storage_owner_flow_control_poll_ms == 5);
-  assert(default_config.storage_owner_flow_control_max_delay_us == 20'000);
 
   const auto budgeted = make_config_with_extra({
     "--storage-owner-stage2-budget-backlog-low", "1000",
@@ -244,12 +270,18 @@ int main() {
   assert(budgeted.storage_owner_stage2_budget_max_expansions == 8);
   assert(budgeted.storage_owner_stage2_budget_max_candidate_visits == 512);
 
-  const auto flow_controlled = make_config_with_extra({
-    "--storage-owner-flow-control-backlog-low", "2000",
-    "--storage-owner-flow-control-backlog-high", "16000"});
-  assert(flow_controlled.storage_owner_flow_control_backlog_low == 2000);
-  assert(flow_controlled.storage_owner_flow_control_backlog_high == 16000);
+  const auto deadline_controlled = make_config_with_extra({
+    "--storage-owner-repair-deadline-ms", "1000"});
+  assert(deadline_controlled.storage_owner_repair_deadline_ms == 1000);
 
+  expect_configuration_rejected([] {
+    (void)make_config_with_extra({
+      "--storage-owner-ack-backlog-limit", "4096"});
+  });
+  expect_configuration_rejected([] {
+    (void)make_config_with_extra({
+      "--gpu-graph-prefetch-depth", "16"});
+  });
   expect_configuration_rejected([] {
     (void)make_config_with_extra({
       "--storage-owner-stage2-budget-backlog-low", "1000"});
@@ -261,17 +293,18 @@ int main() {
   });
   expect_configuration_rejected([] {
     (void)make_config_with_extra({
-      "--storage-owner-flow-control-backlog-high", "8000"});
+      "--storage-owner-flow-control-backlog-low", "2000"});
   });
   expect_configuration_rejected([] {
     (void)make_config_with_extra({
-      "--storage-owner-flow-control-backlog-low", "8000",
-      "--storage-owner-flow-control-backlog-high", "1000"});
+      "--storage-owner-flow-control-backlog-high", "16000"});
   });
   expect_configuration_rejected([] {
     (void)make_config_with_extra({
-      "--storage-owner-flow-control-backlog-low", "1000",
-      "--storage-owner-flow-control-backlog-high", "8000",
+      "--storage-owner-flow-control-max-delay-us", "20000"});
+  });
+  expect_configuration_rejected([] {
+    (void)make_config_with_extra({
       "--storage-owner-flow-control-poll-ms", "0"});
   });
 
@@ -283,6 +316,7 @@ int main() {
   assert(default_config.storage_owner_exact_max_attempts == 0);
   assert(default_config.storage_owner_lease_merge);
   const auto legacy_merge = make_config_with_extra({
+    "--storage-owner-update-completion-mode", "manual",
     "--storage-owner-lease-merge", "false"});
   assert(!legacy_merge.storage_owner_lease_merge);
 

@@ -2,6 +2,8 @@
 #include "gpu_search/maintenance_telemetry.hh"
 #include "service/storage_owner_client_helpers.hh"
 
+#include <cstdlib>
+
 using namespace memory_node_storage_owner_runtime_detail;
 
 void MemoryNode::process_storage_owner_insert_task(const StorageOwnerInsertTask& task) {
@@ -64,6 +66,16 @@ void MemoryNode::process_storage_owner_insert_task(const StorageOwnerInsertTask&
     }
   }
 
+  if (mutation_completion_trace_enabled()) {
+    for (u32 item = 0; item < request->item_count; ++item) {
+      std::cerr << "[mutation-trace] batch begin owner=" << storage_id_
+                << " batch_id=" << task.batch_id
+                << " operation_id=" << operation_ids[item]
+                << " id=" << ids[item]
+                << " kind=" << static_cast<u32>(scratch.kinds[item])
+                << " home=" << stage1_homes[item] << std::endl;
+    }
+  }
   InsertBreakdownCounters breakdown{};
   ExactInsertPhaseCounters exact_phases{};
   const auto process_started = std::chrono::steady_clock::now();
@@ -137,6 +149,11 @@ void MemoryNode::process_storage_owner_insert_task(const StorageOwnerInsertTask&
         &scratch.results,
         emit_completion);
 
+  if (mutation_completion_trace_enabled()) {
+    std::cerr << "[mutation-trace] batch end owner=" << storage_id_
+              << " batch_id=" << task.batch_id
+              << " ok=" << ok << std::endl;
+  }
   if (synchronous_exact) {
     exact_phases.rdma_wait_ns +=
       current_storage_owner_thread_->finish_exact_rdma_timing();
@@ -285,6 +302,13 @@ void MemoryNode::post_storage_owner_token_completion(
   auto* output = reinterpret_cast<
     service::storage_owner::MutationCompletionV2*>(
       insert_runtime_.buffer.get_full_buffer() + offset);
+  if (mutation_completion_trace_enabled()) {
+    std::cerr << "[mutation-trace] post client=" << client_id
+              << " slot=" << slot_id
+              << " operation_id=" << completion.operation_id
+              << " owner=" << completion.owner_storage
+              << " status=" << completion.status << std::endl;
+  }
   *output = completion;
 
   std::lock_guard<std::mutex> send_lock(

@@ -110,15 +110,21 @@ void test_barrier_subphases_release_search_lane() {
   assert(!detail::stage2_finalize_subphase_needs_lane(Subphase::removal_wait));
 }
 
-void test_reconcile_pipeline_has_install_removal_and_release() {
+void test_reconcile_barriers_preserve_lease_lifecycle() {
   using Barrier = detail::Stage2ReconcileBarrier;
   const Barrier first = detail::stage2_reconcile_first_barrier();
   assert(first == Barrier::install);
-  const Barrier second = detail::stage2_reconcile_next_barrier(first);
-  assert(second == Barrier::removal);
-  const Barrier third = detail::stage2_reconcile_next_barrier(second);
-  assert(third == Barrier::release);
-  assert(detail::stage2_reconcile_next_barrier(third) == Barrier::none);
+  assert(detail::stage2_reconcile_next_barrier(first, false) == Barrier::none);
+  assert(detail::stage2_reconcile_certificate_kind(false) ==
+         protocol::ReconcileReverseOpKind::promote_stable_bridge);
+  Barrier barrier = first;
+  barrier = detail::stage2_reconcile_next_barrier(barrier, true);
+  assert(barrier == Barrier::removal);
+  barrier = detail::stage2_reconcile_next_barrier(barrier, true);
+  assert(barrier == Barrier::none);
+  assert(detail::stage2_reconcile_next_barrier(barrier, true) == Barrier::none);
+  assert(detail::stage2_reconcile_certificate_kind(true) ==
+         protocol::ReconcileReverseOpKind::acquire_certificate_lease);
 }
 
 void test_barrier_packing_preserves_target_order_and_never_splits_a_target() {
@@ -154,6 +160,65 @@ void test_barrier_packing_preserves_target_order_and_never_splits_a_target() {
   assert((*packed)[1][1].kind ==
          static_cast<std::uint32_t>(Kind::promote_stable_bridge));
   assert(!detail::pack_stage2_reconcile_target_runs(install, 1).has_value());
+}
+
+void test_shared_parent_orders_all_ordinary_ops_before_certificates() {
+  using Kind = protocol::ReconcileReverseOpKind;
+  std::vector<protocol::ReconcileReverseOp> ops;
+  for (const auto& [target, kind] : {
+         std::pair<std::uint64_t, Kind>{100, Kind::add},
+         {100, Kind::promote_stable_bridge},
+         {100, Kind::remove_if_present},
+         {100, Kind::acquire_certificate_lease},
+         {200, Kind::add},
+         {200, Kind::acquire_certificate_lease},
+       }) {
+    auto value = op(target, 1, 1);
+    value.kind = static_cast<std::uint32_t>(kind);
+    ops.push_back(value);
+  }
+  detail::order_stage2_install_ops(ops);
+  const std::uint32_t ordinary[] = {
+    static_cast<std::uint32_t>(Kind::add),
+    static_cast<std::uint32_t>(Kind::remove_if_present),
+    static_cast<std::uint32_t>(Kind::add),
+  };
+  for (size_t index = 0; index < 3; ++index) {
+    assert(ops[index].kind == ordinary[index]);
+    assert(!detail::stage2_mandatory_certificate_op(ops[index]));
+  }
+  for (size_t index = 3; index < ops.size(); ++index) {
+    assert(detail::stage2_mandatory_certificate_op(ops[index]));
+  }
+  const auto packed = detail::pack_stage2_reconcile_target_runs(ops, 5);
+  assert(packed.has_value());
+  assert(packed->size() == 2);
+  for (const auto& chunk : *packed) {
+    bool certificate_seen = false;
+    for (const auto& value : chunk) {
+      const bool certificate = detail::stage2_mandatory_certificate_op(value);
+      assert(!(certificate_seen && !certificate));
+      certificate_seen = certificate_seen || certificate;
+    }
+  }
+}
+
+void test_atomic_transfer_orders_provisional_cleanup_after_promotion() {
+  using Kind = protocol::ReconcileReverseOpKind;
+  std::vector<protocol::ReconcileReverseOp> ops;
+  for (const auto kind : {Kind::promote_stable_bridge,
+                          Kind::remove_provisional_if_present,
+                          Kind::add}) {
+    auto value = op(100, 1, 1);
+    value.kind = static_cast<std::uint32_t>(kind);
+    ops.push_back(value);
+  }
+  detail::order_stage2_install_ops(ops);
+  assert(ops[0].kind == static_cast<std::uint32_t>(Kind::add));
+  assert(ops[1].kind == static_cast<std::uint32_t>(
+    Kind::promote_stable_bridge));
+  assert(ops[2].kind == static_cast<std::uint32_t>(
+    Kind::remove_provisional_if_present));
 }
 
 void test_pending_item_does_not_block_sibling_pipeline() {
@@ -193,8 +258,10 @@ int main() {
   test_epoch_and_context_generation_fence_late_ack();
   test_empty_barrier_completes_without_transport();
   test_barrier_subphases_release_search_lane();
-  test_reconcile_pipeline_has_install_removal_and_release();
+  test_reconcile_barriers_preserve_lease_lifecycle();
   test_barrier_packing_preserves_target_order_and_never_splits_a_target();
+  test_shared_parent_orders_all_ordinary_ops_before_certificates();
+  test_atomic_transfer_orders_provisional_cleanup_after_promotion();
   test_pending_item_does_not_block_sibling_pipeline();
   return 0;
 }

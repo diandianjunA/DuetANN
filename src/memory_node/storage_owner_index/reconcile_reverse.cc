@@ -1,4 +1,5 @@
 #include "memory_node/storage_owner_index/detail.hh"
+#include "memory_node/storage_owner_maintenance/cleanup_policy.hh"
 #include "memory_node/storage_owner_index/reconcile_reverse_policy.hh"
 #include "memory_node/storage_owner_index/vector_snapshot_policy.hh"
 
@@ -21,7 +22,12 @@ bool MemoryNode::reconcile_local_reverse_ops(
     const span<const service::storage_owner::ReconcileReverseOp> ops,
     const Configuration& config,
     vec<service::storage_owner::ReconcileReverseResult>& results) {
+  ReverseSnapshotReuseScope snapshot_reuse(ops.size());
   bool lease_merge = false;
+  vec<RemotePtr> identity_candidates;
+  identity_candidates.reserve(ops.size());
+  hashset_t<RemotePtr> seen_identities;
+  seen_identities.reserve(ops.size());
   for (const auto& op : ops) {
     const RemotePtr target{op.target_raw};
     if (target.is_null() || !target.is_well_formed() ||
@@ -33,10 +39,32 @@ bool MemoryNode::reconcile_local_reverse_ops(
       }
       return false;
     }
+    const auto kind = static_cast<service::storage_owner::ReconcileReverseOpKind>(
+      op.kind);
+    const RemotePtr candidate{op.new_candidate_raw};
+    if (reconcile_kind_needs_new_identity(kind) && !candidate.is_null() &&
+        candidate != target && seen_identities.insert(candidate).second) {
+      identity_candidates.push_back(candidate);
+    }
     lease_merge = lease_merge ||
-      op.kind >= static_cast<u32>(
-        service::storage_owner::ReconcileReverseOpKind::
-          acquire_certificate_lease);
+      (config.storage_owner_lease_merge &&
+       kind == service::storage_owner::ReconcileReverseOpKind::refine_add) ||
+      kind == service::storage_owner::ReconcileReverseOpKind::
+        acquire_certificate_lease ||
+      kind == service::storage_owner::ReconcileReverseOpKind::
+        release_certificate_lease ||
+      kind == service::storage_owner::ReconcileReverseOpKind::
+        remove_provisional_if_present;
+  }
+  if (!identity_candidates.empty()) {
+    vec<NodeSnapshot> snapshots;
+    vec<StableNodeSnapshotState> states;
+    read_node_snapshots_batched_into(
+      span<const RemotePtr>{identity_candidates}, config, snapshots,
+      "reconcile_identity_prefetch", &states);
+    for (const NodeSnapshot& snapshot : snapshots) {
+      remember_reverse_snapshot(snapshot);
+    }
   }
   if (lease_merge) return reconcile_lease_merge_ops(ops, config, results);
   return reconcile_reverse_ops_one_sided(ops, config, results);
@@ -90,29 +118,21 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
     const RemotePtr target{target_raw};
     const vec<size_t>& op_indices = grouped.find(target_raw)->second;
     bool has_promotion = false;
-    bool has_non_install_op = false;
-    bool promotion_seen = false;
-    bool needs_reorder = false;
     for (const size_t op_index : op_indices) {
-      const auto kind = static_cast<ReconcileReverseOpKind>(
-        ops[op_index].kind);
-      if (kind == ReconcileReverseOpKind::promote_stable_bridge) {
-        has_promotion = true;
-        promotion_seen = true;
-      } else if (kind == ReconcileReverseOpKind::add ||
-                 kind == ReconcileReverseOpKind::replace_or_add) {
-        needs_reorder = needs_reorder || promotion_seen;
-      } else {
-        has_non_install_op = true;
-      }
+      has_promotion = has_promotion ||
+        static_cast<ReconcileReverseOpKind>(ops[op_index].kind) ==
+          ReconcileReverseOpKind::promote_stable_bridge;
     }
-    if (has_promotion && has_non_install_op) {
-      // A promotion mixed with removal/repair is not an install transaction.
-      // Reject it before locking or mutating so a malformed sender can never
-      // bypass the ordinary-before-mandatory receiver invariant.
+    vec<size_t> reordered_indices;
+    span<const size_t> execution_indices{op_indices};
+    if (has_promotion &&
+        !reconcile_reverse_target_execution_order(
+          ops, span<const size_t>{op_indices}, reordered_indices)) {
       structurally_valid = false;
       continue;
     }
+    if (has_promotion) execution_indices = reordered_indices;
+
     vec<RemotePtr> mandatory_promotions;
     mandatory_promotions.reserve(op_indices.size());
     for (const size_t op_index : op_indices) {
@@ -134,15 +154,6 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
       // transaction as malformed without publishing a partial certificate.
       structurally_valid = false;
       continue;
-    }
-    vec<size_t> reordered_indices;
-    span<const size_t> execution_indices{op_indices};
-    if (needs_reorder) {
-      const bool ordered = reconcile_reverse_target_execution_order(
-        ops, span<const size_t>{op_indices}, reordered_indices);
-      lib_assert(ordered,
-                 "validated install transaction could not be reordered");
-      execution_indices = span<const size_t>{reordered_indices};
     }
     const auto pointer_sane = [&](const RemotePtr candidate) {
       if (candidate.is_null() ||
@@ -186,6 +197,14 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
     }
     (void)target_id;
     (void)target_generation;
+    if (memory_node_storage_owner_maintenance_detail::
+          stage2_retired_target_cleanup_allowed(target_header)) {
+      for (const size_t op_index : op_indices) {
+        results[op_index] = reconcile_retired_target_result(ops[op_index]);
+      }
+      unlock_node(target);
+      continue;
+    }
     const bool target_stable =
       VamanaNode::stable_graph_mutation_allowed(target_header);
     const bool target_route_accounted =
@@ -264,8 +283,16 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
       target_vector_data = remote_target_vector.data();
     }
 
+    Configuration prune_config = config;
+    if (std::any_of(op_indices.begin(), op_indices.end(), [&](size_t index) {
+          return static_cast<ReconcileReverseOpKind>(ops[index].kind) ==
+            ReconcileReverseOpKind::refine_add;
+        })) {
+      prune_config.alpha = -std::abs(prune_config.alpha);
+    }
     bool robust_prune_retryable = false;
-    const auto robust_prune = [&](const vec<RemotePtr>& candidates) {
+    const auto robust_prune = [&](const vec<RemotePtr>& candidates,
+                                  size_t existing_count = 0) {
       vec<StableNodeSnapshotState> snapshot_states;
       vec<NodeSnapshot> snapshots =
         read_node_snapshots_batched(
@@ -286,7 +313,7 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
         target_vector_data,
         VamanaNode::vector_dtype(),
         span<const NodeSnapshot>{snapshots.data(), snapshots.size()},
-        skip, config, config.R);
+        skip, prune_config, config.R, false, existing_count);
       vec<RemotePtr> eligible_candidates;
       eligible_candidates.reserve(snapshots.size());
       for (const NodeSnapshot& snapshot : snapshots) {
@@ -322,7 +349,7 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
       const bool reachability_target_stable = target_stable &&
         (!mandatory_reachability || target_route_accounted);
 
-      if (kind == ReconcileReverseOpKind::add) {
+      if (reconcile_kind_is_ordinary_add(kind)) {
         // Preserve the receiver-selected per-target order. Stronger
         // reconciliation operations delimit compatible ordinary-add runs;
         // this keeps mandatory/removal operation boundaries intact while
@@ -361,7 +388,8 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
           vec<ReconcileReverseResult> add_results;
           reconcile_reverse_add_batch(
             span<const service::storage_owner::ReconcileReverseOp>{add_ops},
-            span<const u8>{new_identity_stable}, target_stable, config.R,
+            span<const u8>{new_identity_stable},
+            target_stable, config.R,
             VamanaNode::provisional_slots(), adjacency.stable,
             adjacency.provisional, add_results, robust_prune);
           for (size_t run_position = group_position;
@@ -385,6 +413,34 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
         (reconcile_contains(adjacency.stable, old_candidate) ||
          reconcile_contains(adjacency.provisional, old_candidate));
       const bool needs_new = reconcile_kind_needs_new_identity(kind);
+      if ((kind == ReconcileReverseOpKind::remove_if_present ||
+           kind == ReconcileReverseOpKind::remove_provisional_if_present) &&
+          old_present) {
+        const bool pointer_valid = pointer_sane(old_candidate);
+        NodeSnapshot stale_snapshot;
+        const bool snapshot_read = pointer_valid &&
+          read_node_snapshot(old_candidate, stale_snapshot);
+        const bool identity_matches = snapshot_read &&
+          stale_snapshot.id == op.id &&
+          stale_snapshot.generation == op.generation;
+        bool terminal = reconcile_stale_removal_completed(
+          old_present, pointer_valid, snapshot_read, identity_matches);
+        if (!terminal && !snapshot_read) {
+          vec<std::pair<RemotePtr, u64>> identity;
+          vec<StableNodeSnapshotState> states;
+          read_node_identity_headers_batched_into(
+            span<const RemotePtr>{&old_candidate, 1}, config, identity, &states);
+          lib_assert(states.size() == 1,
+                     "stale removal identity observation lost its input");
+          terminal = states.front() == StableNodeSnapshotState::terminal;
+        }
+        if (terminal) {
+          results[op_index].placement_sequence = op.placement_sequence;
+          results[op_index].removed = 1;
+          ++group_position;
+          continue;
+        }
+      }
 
       NodeSnapshot old_snapshot;
       NodeSnapshot new_snapshot;

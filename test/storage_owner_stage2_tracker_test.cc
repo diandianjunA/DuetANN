@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "memory_node/storage_owner_maintenance/admission_policy.hh"
 #include "memory_node/storage_owner_maintenance/cleanup_scheduler.hh"
 #include "memory_node/storage_owner_maintenance/search_lane_pool.hh"
 #include "memory_node/storage_owner_maintenance/stage2_tracker.hh"
@@ -93,6 +94,27 @@ void test_cleanup_scheduler_never_bypasses_delayed_predecessor() {
     heap.front(), 4, epoch + std::chrono::milliseconds(9)));
   assert(detail::cleanup_schedule_ready(
     heap.front(), 4, epoch + std::chrono::milliseconds(10)));
+}
+
+void test_pipeline_refinement_unblocks_cleanup_dependencies() {
+  assert(detail::refinement_cleanup_gate_open(false, false, false));
+  assert(!detail::refinement_cleanup_gate_open(false, true, false));
+  assert(!detail::refinement_cleanup_gate_open(false, true, true));
+  assert(detail::refinement_cleanup_gate_open(true, false, false));
+  assert(detail::refinement_cleanup_gate_open(true, true, false));
+  assert(!detail::refinement_cleanup_gate_open(true, true, true));
+
+  assert(detail::refinement_insert_admission_allowed(false, true));
+  assert(!detail::refinement_insert_admission_allowed(true, true));
+  assert(!detail::refinement_insert_admission_allowed(false, false));
+  const auto first = std::chrono::steady_clock::now();
+  assert(!detail::refinement_retry_deadline_exceeded({}, first, 10));
+  assert(!detail::refinement_retry_deadline_exceeded(
+    first, first + std::chrono::milliseconds(10), 10));
+  assert(detail::refinement_retry_deadline_exceeded(
+    first, first + std::chrono::milliseconds(11), 10));
+  assert(!detail::refinement_retry_deadline_exceeded(
+    first, first + std::chrono::hours(1), 0));
 }
 
 void test_context_capacity_and_state_transitions() {
@@ -550,6 +572,7 @@ void test_round_robin_context_scan_rotates_without_omission() {
 int main() {
   test_cleanup_scheduler_is_ordered_and_retry_fenced();
   test_cleanup_scheduler_never_bypasses_delayed_predecessor();
+  test_pipeline_refinement_unblocks_cleanup_dependencies();
   test_context_capacity_and_state_transitions();
   test_request_retry_duplicates_and_reverse_fan_in();
   test_request_capacity_and_validation();

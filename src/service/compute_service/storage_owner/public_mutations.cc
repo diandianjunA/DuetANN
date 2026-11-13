@@ -1,5 +1,8 @@
 #include "service/compute_service/detail.hh"
 
+#include <cstdlib>
+#include <unordered_map>
+
 using namespace compute_service_detail;
 
 size_t ComputeService::submit_storage_owner_mutations(
@@ -43,6 +46,8 @@ size_t ComputeService::submit_storage_owner_mutations(
   thread_local vec<u32> pending;
   thread_local vec<byte_t> canonical_bytes;
   thread_local vec<element_t> canonical_vector;
+  thread_local std::unordered_map<u32, std::pair<u32, u64>>
+    debug_completion_owners;
   pending.clear();
   pending.reserve(std::min<size_t>(
     items.size(), storage_completion_pool_->capacity()));
@@ -81,8 +86,17 @@ size_t ComputeService::submit_storage_owner_mutations(
                   << " ms; caller stopped waiting but the bounded producer "
                      "cell remains valid until its late completion"
                   << std::endl;
+        if (service::storage_owner::mutation_completion_trace_enabled()) {
+          const auto found = debug_completion_owners.find(completion_id);
+          if (found != debug_completion_owners.end()) {
+            std::cerr << "[mutation-trace] timeout owner=" << found->second.first
+                      << " operation_id=" << found->second.second
+                      << " completion_id=" << completion_id << std::endl;
+          }
+        }
       }
       storage_completion_pool_->release_consumer(completion_id);
+      debug_completion_owners.erase(completion_id);
       pending.pop_back();
       return;
     }
@@ -110,6 +124,7 @@ size_t ComputeService::submit_storage_owner_mutations(
     }
     committed += result == bounded::CompletionPool::Result::success ? 1 : 0;
     storage_completion_pool_->release_consumer(completion_id);
+    debug_completion_owners.erase(completion_id);
     pending.pop_back();
   };
 
@@ -203,8 +218,19 @@ size_t ComputeService::submit_storage_owner_mutations(
       (static_cast<u64>(task.operation_generation) << 32) | task_id;
     lib_assert(task.operation_id != 0,
                "storage-owner operation id wrapped to zero");
+    if (service::storage_owner::mutation_completion_trace_enabled()) {
+      debug_completion_owners[task.completion_id] =
+        {owner_storage, task.operation_id};
+    }
     state.queue->push_wait(task_id);
     state.published_tasks.fetch_add(1, std::memory_order_release);
+    if (service::storage_owner::mutation_completion_trace_enabled()) {
+      std::cerr << "[mutation-trace] submit owner=" << owner_storage
+                << " operation_id=" << task.operation_id
+                << " id=" << item.id
+                << " kind=" << static_cast<u32>(kind)
+                << " home=" << stage1_home << std::endl;
+    }
     // Queue publication precedes the release-store. A sender that observes no
     // remaining producer therefore either already drained this task or can
     // acquire it on its final queue probe.

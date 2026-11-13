@@ -78,6 +78,8 @@ void ComputeService::start_storage_insert_runtime() {
     std::make_unique<std::atomic<u64>[]>(owner_count);
   storage_flow_control_durable_sequences_ =
     std::make_unique<std::atomic<u64>[]>(owner_count);
+  storage_repair_timing_ =
+    std::make_unique<StorageOwnerRepairTiming[]>(owner_count);
   for (u32 shard = 0; shard < owner_count; ++shard) {
     storage_maintenance_targets_[shard].store(0, std::memory_order_relaxed);
     storage_flow_control_next_sequences_[shard].store(
@@ -152,20 +154,17 @@ void ComputeService::start_storage_insert_runtime() {
   // Coupled mode publishes no Stage2 watermarks, so the poll thread would
   // read a permanently idle control block; only decoupled inserts benefit.
   const bool flow_control_enabled =
-    config_.storage_owner_flow_control_backlog_low != 0 &&
+    config_.storage_owner_repair_deadline_ms != 0 &&
     !config_.synchronous_exact_updates_enabled() &&
     search_engine_ != nullptr;
   if (flow_control_enabled) {
     storage_flow_control_poll_thread_ =
       std::thread([this]() { run_storage_flow_control_poll_loop(); });
     print_status(
-      "storage-owner sender flow control: backlog low/high=" +
-      std::to_string(config_.storage_owner_flow_control_backlog_low) + "/" +
-      std::to_string(config_.storage_owner_flow_control_backlog_high) +
-      " poll_ms=" +
+      "storage-owner deadline admission: poll_ms=" +
       std::to_string(config_.storage_owner_flow_control_poll_ms) +
-      " max_delay_us=" +
-      std::to_string(config_.storage_owner_flow_control_max_delay_us));
+      " repair_deadline_ms=" +
+      std::to_string(config_.storage_owner_repair_deadline_ms));
   }
   if (!config_.disable_thread_pinning) {
     const u32 progress_core = core_assignment_.get_available_core();

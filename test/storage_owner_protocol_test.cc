@@ -54,7 +54,7 @@ void test_authority_extension_rpc_layouts() {
   namespace protocol = service::storage_owner;
 
   static_assert(protocol::kMutationProtocolVersion == 4);
-  static_assert(protocol::kPeerRpcVersion == 16);
+  static_assert(protocol::kPeerRpcVersion == 17);
   static_assert(static_cast<u32>(
                   protocol::PeerRpcType::stage1_arm_response) == 14);
   static_assert(static_cast<u32>(
@@ -135,7 +135,9 @@ void test_authority_extension_rpc_layouts() {
     protocol::ReconcileReverseOpKind::acquire_certificate_lease);
   assert(protocol::reconcile_reverse_op_valid(reconcile_op));
   reconcile_op.kind = static_cast<u32>(
-    protocol::ReconcileReverseOpKind::remove_provisional_if_present) + 1;
+    protocol::ReconcileReverseOpKind::refine_add);
+  assert(protocol::reconcile_reverse_op_valid(reconcile_op));
+  ++reconcile_op.kind;
   assert(!protocol::reconcile_reverse_op_valid(reconcile_op));
   auto* score_many_items = protocol::stage2_score_many_items(
     score_many_request.data());

@@ -72,6 +72,32 @@ option(DVSTOR_BUILD_TESTS "Build local DVSTOR smoke tests" ON)
 option(DVSTOR_BUILD_OFFLINE_TOOLS
     "Build CPU-only index construction, partitioning, and PQ tools" ON)
 option(DVSTOR_USE_NATIVE_ARCH "Compile C++ sources with -march=native" ON)
+option(DVSTOR_PERSISTENT_WIDE_SORT "Build the wide persistent Beam sort for ablation" OFF)
+option(DVSTOR_PERSISTENT_LEGACY_MERGE "Build the legacy persistent Beam merge for ablation" OFF)
+set(DVSTOR_PERSISTENT_MAX_BEAM "256" CACHE STRING
+    "Maximum traversal Beam compiled into the persistent kernel (128 or 256)")
+set_property(CACHE DVSTOR_PERSISTENT_MAX_BEAM PROPERTY STRINGS 128 256)
+if (NOT DVSTOR_PERSISTENT_MAX_BEAM MATCHES "^(128|256)$")
+    message(FATAL_ERROR "DVSTOR_PERSISTENT_MAX_BEAM must be 128 or 256")
+endif ()
+set(DVSTOR_PERSISTENT_MAX_EXACT "512" CACHE STRING
+    "Maximum final-rerank capacity compiled into the persistent kernel (256 or 512)")
+set_property(CACHE DVSTOR_PERSISTENT_MAX_EXACT PROPERTY STRINGS 256 512)
+if (NOT DVSTOR_PERSISTENT_MAX_EXACT MATCHES "^(256|512)$")
+    message(FATAL_ERROR "DVSTOR_PERSISTENT_MAX_EXACT must be 256 or 512")
+endif ()
+math(EXPR DVSTOR_PERSISTENT_MIN_EXACT "${DVSTOR_PERSISTENT_MAX_BEAM} * 2")
+if (DVSTOR_PERSISTENT_MAX_EXACT LESS DVSTOR_PERSISTENT_MIN_EXACT)
+    message(FATAL_ERROR "DVSTOR_PERSISTENT_MAX_EXACT must be at least twice DVSTOR_PERSISTENT_MAX_BEAM")
+endif ()
+set(DVSTOR_GRAPH_EXTENT_QUANTUM_EDGES "8" CACHE STRING
+    "Number of graph edges in each Live/DynaExtent length class")
+if (NOT DVSTOR_GRAPH_EXTENT_QUANTUM_EDGES MATCHES "^[1-9][0-9]*$" OR
+    DVSTOR_GRAPH_EXTENT_QUANTUM_EDGES GREATER 127)
+    message(FATAL_ERROR "DVSTOR_GRAPH_EXTENT_QUANTUM_EDGES must be in [1, 127]")
+endif ()
+add_compile_definitions(
+    DVSTOR_GRAPH_EXTENT_QUANTUM_EDGES=${DVSTOR_GRAPH_EXTENT_QUANTUM_EDGES})
 
 if (DVSTOR_STORAGE_NODE_ONLY)
     set(Boost_NO_BOOST_CMAKE ON CACHE BOOL
@@ -135,6 +161,7 @@ add_subdirectory(rdma-library)
 add_subdirectory(thirdparty)
 
 set(DVSTOR_MEMORY_NODE_SOURCES
+    src/common/configuration.cc
     src/gpu_search/index_format.cc
     src/gpu_search/pq_index.cc
     src/memory_node/memory_node.cc
@@ -144,10 +171,15 @@ set(DVSTOR_MEMORY_NODE_SOURCES
     src/memory_node/peer_rpc/request_handlers.cc
     src/memory_node/peer_rpc/runtime.cc
     src/memory_node/peer_rpc/stage1_requests.cc
+    src/memory_node/peer_rpc/stage2_requests.cc
     src/memory_node/peer_rpc/workers.cc
     src/memory_node/storage_owner_index/allocation.cc
+    src/memory_node/storage_owner_index/partition_local_search.cc
     src/memory_node/storage_owner_index/candidate_search.cc
+    src/memory_node/storage_owner_index/candidate_search_async.cc
     src/memory_node/storage_owner_index/graph_access.cc
+    src/memory_node/storage_owner_index/graph_snapshot.cc
+    src/memory_node/storage_owner_index/graph_publication.cc
     src/memory_node/storage_owner_index/graph_mutation.cc
     src/memory_node/storage_owner_index/lease_merge.cc
     src/memory_node/storage_owner_index/reconcile_reverse.cc
@@ -156,6 +188,12 @@ set(DVSTOR_MEMORY_NODE_SOURCES
     src/memory_node/storage_owner_maintenance/queue.cc
     src/memory_node/storage_owner_maintenance/runtime.cc
     src/memory_node/storage_owner_maintenance/worker.cc
+    src/memory_node/storage_owner_maintenance/worker_loop.cc
+    src/memory_node/storage_owner_maintenance/worker_reverse.cc
+    src/memory_node/storage_owner_maintenance/worker_search.cc
+    src/memory_node/storage_owner_maintenance/worker_reconcile.cc
+    src/memory_node/storage_owner_maintenance/worker_prepare.cc
+    src/memory_node/storage_owner_maintenance/worker_finalize.cc
     src/memory_node/storage_owner_runtime/batch_execution.cc
     src/memory_node/storage_owner_runtime/exact_execution.cc
     src/memory_node/storage_owner_runtime/lifecycle.cc
@@ -316,29 +354,30 @@ else ()
         set(DVSTOR_HAVE_GPUNETIO ON)
     endif ()
     if (DVSTOR_HAVE_GPUNETIO)
-        # The persistent query path uses SM80 warp reductions and system-scope
-        # acquire/release operations. Reject an incompatible fatbin at configure
-        # time instead of producing a binary that fails after index/RDMA startup.
+        # Volta provides the independent-thread synchronization and system-scope
+        # operations used by GPUNetIO. SM80 warp reductions have an SM70
+        # compatibility implementation. Reject older architectures before any
+        # index/RDMA initialization instead of failing after startup.
         if (NOT CMAKE_CUDA_ARCHITECTURES)
-        message(FATAL_ERROR
-            "DVSTOR persistent GPUNetIO requires an explicit SM80+ CUDA "
-            "architecture; CMAKE_CUDA_ARCHITECTURES is empty or OFF")
-    endif ()
-    foreach (DVSTOR_CUDA_ARCH IN LISTS CMAKE_CUDA_ARCHITECTURES)
-        if (DVSTOR_CUDA_ARCH MATCHES "^([0-9]+)(-real|-virtual)?$")
-            set(DVSTOR_CUDA_ARCH_NUMBER "${CMAKE_MATCH_1}")
-            if (DVSTOR_CUDA_ARCH_NUMBER LESS 80)
-                message(FATAL_ERROR
-                    "DVSTOR persistent GPUNetIO requires SM80+; unsupported "
-                    "CMAKE_CUDA_ARCHITECTURES entry: ${DVSTOR_CUDA_ARCH}")
-            endif ()
-        else ()
             message(FATAL_ERROR
-                "DVSTOR persistent GPUNetIO requires an explicit numeric "
-                "SM80+ CUDA architecture; unsupported entry: "
-                "${DVSTOR_CUDA_ARCH}")
+                "DVSTOR persistent GPUNetIO requires an explicit SM70+ CUDA "
+                "architecture; CMAKE_CUDA_ARCHITECTURES is empty or OFF")
         endif ()
-    endforeach ()
+        foreach (DVSTOR_CUDA_ARCH IN LISTS CMAKE_CUDA_ARCHITECTURES)
+            if (DVSTOR_CUDA_ARCH MATCHES "^([0-9]+)(-real|-virtual)?$")
+                set(DVSTOR_CUDA_ARCH_NUMBER "${CMAKE_MATCH_1}")
+                if (DVSTOR_CUDA_ARCH_NUMBER LESS 70)
+                    message(FATAL_ERROR
+                        "DVSTOR persistent GPUNetIO requires SM70+; unsupported "
+                        "CMAKE_CUDA_ARCHITECTURES entry: ${DVSTOR_CUDA_ARCH}")
+                endif ()
+            else ()
+                message(FATAL_ERROR
+                    "DVSTOR persistent GPUNetIO requires an explicit numeric "
+                    "SM70+ CUDA architecture; unsupported entry: "
+                    "${DVSTOR_CUDA_ARCH}")
+            endif ()
+        endforeach ()
 
         # rdma-core >= v50 declares IBV_WC_DRIVER1 as an enum constant, which
         # the source-level fallback "#define IBV_WC_DRIVER1 135" would clash
@@ -355,13 +394,28 @@ int main() { return static_cast<int>(IBV_WC_DRIVER1); }"
         # rdma-core headers may only have the generic ibv_reg_dmabuf_mr.
         set(CMAKE_REQUIRED_LIBRARIES ${DVSTOR_MLX5_LIBRARY})
         check_cxx_source_compiles("
+#include <infiniband/verbs.h>
+#if !defined(IBV_WC_DRIVER1) && !defined(DVSTOR_HAVE_IBV_WC_DRIVER1)
+#define IBV_WC_DRIVER1 135
+#define IBV_WC_DRIVER2 136
+#define IBV_WC_DRIVER3 137
+#endif
 #include <infiniband/mlx5dv.h>
 int main() { return mlx5dv_reg_dmabuf_mr(nullptr, 0, 0, 0, 0, 0, 0) ==
                      nullptr; }"
             DVSTOR_HAVE_MLX5DV_REG_DMABUF_MR)
-        unset(CMAKE_REQUIRED_LIBRARIES)
         if (DVSTOR_HAVE_MLX5DV_REG_DMABUF_MR)
             add_compile_definitions(DVSTOR_HAVE_MLX5DV_REG_DMABUF_MR=1)
+        endif ()
+        set(CMAKE_REQUIRED_LIBRARIES ${IBVerbs_LIBRARY})
+        check_cxx_source_compiles("
+#include <infiniband/verbs.h>
+int main() { return ibv_reg_dmabuf_mr(nullptr, 0, 0, 0, 0, 0, 0) ==
+                     nullptr; }"
+            DVSTOR_HAVE_IBV_REG_DMABUF_MR)
+        unset(CMAKE_REQUIRED_LIBRARIES)
+        if (DVSTOR_HAVE_IBV_REG_DMABUF_MR)
+            add_compile_definitions(DVSTOR_HAVE_IBV_REG_DMABUF_MR=1)
         endif ()
     endif ()
 
@@ -383,6 +437,12 @@ int main() { return mlx5dv_reg_dmabuf_mr(nullptr, 0, 0, 0, 0, 0, 0) ==
             CUDA::cudart
             rdma_library
         )
+        target_compile_definitions(dvstor_gpu_kernels PUBLIC
+            DVSTOR_PERSISTENT_WIDE_SORT=$<BOOL:${DVSTOR_PERSISTENT_WIDE_SORT}>
+            DVSTOR_PERSISTENT_LEGACY_MERGE=$<BOOL:${DVSTOR_PERSISTENT_LEGACY_MERGE}>
+            DVSTOR_PERSISTENT_MAX_BEAM=${DVSTOR_PERSISTENT_MAX_BEAM}
+            DVSTOR_PERSISTENT_MAX_EXACT=${DVSTOR_PERSISTENT_MAX_EXACT}
+        )
         if (DVSTOR_HAVE_GPUNETIO)
             target_include_directories(dvstor_gpu_kernels PUBLIC ${DVSTOR_DOCA_INCLUDE_DIR})
             target_compile_definitions(dvstor_gpu_kernels PUBLIC DVSTOR_HAVE_GPUNETIO=1)
@@ -403,6 +463,7 @@ int main() { return mlx5dv_reg_dmabuf_mr(nullptr, 0, 0, 0, 0, 0, 0) ==
     # index and storage control plane; the contribution-level progression mode
     # selects which execution owner is constructed.
     set(DVSTOR_RUNTIME_SOURCES
+        src/common/configuration.cc
         src/common/core_assignment.cc
         src/common/timing.cc
         src/gpu_search/navigation_bootstrapper.cc
@@ -503,13 +564,25 @@ int main() { return mlx5dv_reg_dmabuf_mr(nullptr, 0, 0, 0, 0, 0, 0) ==
         dvstor_target_tool_includes(dvstor_breakdown_benchmark)
         target_link_libraries(dvstor_breakdown_benchmark dvstor_breakdown_support)
 
+        add_executable(dvstor_base_extent_churn
+            experiment/contribution/c2_sensitivity/base_extent_churn.cc
+        )
+        dvstor_target_tool_includes(dvstor_base_extent_churn)
+
         add_executable(dvstor_sift101m_long_insert_recall
             tools/dvstor_sift101m_long_insert_recall.cc
+            experiment/contribution/c1_locality/locality_sampler.cc
             tools/breakdown_benchmark/args.cc
             tools/breakdown_benchmark/progress.cc
         )
         dvstor_target_tool_includes(dvstor_sift101m_long_insert_recall)
         target_link_libraries(dvstor_sift101m_long_insert_recall dvstor_runtime)
+        find_package(FaissCPU QUIET)
+        if (FaissCPU_FOUND)
+            target_link_libraries(dvstor_sift101m_long_insert_recall FaissCPU::FaissCPU)
+            target_compile_definitions(dvstor_sift101m_long_insert_recall PRIVATE
+                DVSTOR_LONG_INSERT_WITH_FAISS_CPU=1)
+        endif ()
     endif ()
 
     if (DVSTOR_BUILD_OFFLINE_TOOLS)

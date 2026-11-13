@@ -2,6 +2,8 @@
 #include "memory_node/storage_owner_maintenance/admission_policy.hh"
 #include "memory_node/storage_owner_maintenance/cleanup_scheduler.hh"
 
+#include <cstdlib>
+
 using namespace memory_node_storage_owner_maintenance_detail;
 
 u64 MemoryNode::arm_storage_owner_maintenance(
@@ -19,6 +21,16 @@ u64 MemoryNode::arm_storage_owner_maintenance_batch(
     vec<StorageOwnerMaintenanceTask>& tasks,
     const Configuration& config,
     bool* capacity_blocked) {
+  const auto refinement_backpressure_active = [&]() {
+    for (size_t worker = 0; worker < storage_owner_maintenance_workers_.size();
+         ++worker) {
+      if (storage_owner_refinement_backpressure_[worker].load(
+            std::memory_order_acquire) != 0) {
+        return true;
+      }
+    }
+    return false;
+  };
   if (capacity_blocked != nullptr) *capacity_blocked = false;
   // Peer receive/progress threads are intentionally started before the Stage2
   // executor so RC traffic can queue during node startup. A faster peer may
@@ -54,11 +66,13 @@ u64 MemoryNode::arm_storage_owner_maintenance_batch(
       return storage_owner_maintenance_shutdown_.load(
                std::memory_order_acquire) ||
         storage_insert_shutdown_.load(std::memory_order_acquire) ||
-        maintenance_queue_batch_permit_available(
-          storage_owner_stage2_tasks_.size() +
-            storage_owner_cleanup_tasks_.size(),
-          storage_owner_maintenance_reserved_slots_, task_count,
-          config.storage_owner_maintenance_queue_depth);
+        refinement_insert_admission_allowed(
+          refinement_backpressure_active(),
+          maintenance_queue_batch_permit_available(
+            storage_owner_stage2_tasks_.size() +
+              storage_owner_cleanup_tasks_.size(),
+            storage_owner_maintenance_reserved_slots_, task_count,
+            config.storage_owner_maintenance_queue_depth));
     });
     if (storage_owner_maintenance_shutdown_.load(
           std::memory_order_acquire) ||
@@ -79,9 +93,11 @@ u64 MemoryNode::arm_storage_owner_maintenance_batch(
          !storage_insert_shutdown_.load(std::memory_order_acquire) &&
          !storage_owner_maintenance_shutdown_.load(
            std::memory_order_acquire)) {
-    first_sequence = try_begin_storage_owner_maintenance_batch(
-      span<const u32>{work_items});
-    if (first_sequence != 0) break;
+    if (!refinement_backpressure_active()) {
+      first_sequence = try_begin_storage_owner_maintenance_batch(
+        span<const u32>{work_items});
+      if (first_sequence != 0) break;
+    }
     if (capacity_blocked != nullptr) *capacity_blocked = true;
     std::unique_lock<std::mutex> lock(storage_owner_maintenance_mutex_);
     storage_owner_maintenance_cv_.wait_for(
@@ -172,7 +188,7 @@ u64 MemoryNode::activate_storage_owner_cleanup_batch(
   const size_t task_count = tasks.size();
   {
     std::unique_lock<std::mutex> lock(storage_owner_maintenance_mutex_);
-    storage_owner_maintenance_cv_.wait(lock, [&]() {
+    const auto permit_available = [&]() {
       return storage_owner_maintenance_shutdown_.load(
                std::memory_order_acquire) ||
         storage_insert_shutdown_.load(std::memory_order_acquire) ||
@@ -182,7 +198,21 @@ u64 MemoryNode::activate_storage_owner_cleanup_batch(
           storage_owner_maintenance_reserved_slots_,
           task_count,
           config.storage_owner_maintenance_queue_depth);
-    });
+    };
+    while (!storage_owner_maintenance_cv_.wait_for(
+        lock, std::chrono::seconds(5), permit_available)) {
+      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        std::cerr << "[cleanup-admission-wait] self=" << storage_id_
+                  << " tasks=" << task_count
+                  << " first_id=" << tasks.front().id
+                  << " stage2_queue=" << storage_owner_stage2_tasks_.size()
+                  << " cleanup_queue=" << storage_owner_cleanup_tasks_.size()
+                  << " reserved=" << storage_owner_maintenance_reserved_slots_
+                  << " depth=" << config.storage_owner_maintenance_queue_depth
+                  << " incomplete=" << storage_owner_maintenance_incomplete()
+                  << std::endl;
+      }
+    }
     if (storage_owner_maintenance_shutdown_.load(
           std::memory_order_acquire) ||
         storage_insert_shutdown_.load(std::memory_order_acquire)) {
@@ -193,6 +223,7 @@ u64 MemoryNode::activate_storage_owner_cleanup_batch(
 
   vec<u32> work_items(task_count, 1);
   u64 first_sequence = 0;
+  auto last_debug = std::chrono::steady_clock::now();
   while (first_sequence == 0 &&
          !storage_insert_shutdown_.load(std::memory_order_acquire) &&
          !storage_owner_maintenance_shutdown_.load(
@@ -200,6 +231,17 @@ u64 MemoryNode::activate_storage_owner_cleanup_batch(
     first_sequence = try_begin_storage_owner_maintenance_batch(
       span<const u32>{work_items});
     if (first_sequence != 0) break;
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+        std::chrono::steady_clock::now() - last_debug >=
+          std::chrono::seconds(5)) {
+      last_debug = std::chrono::steady_clock::now();
+      std::cerr << "[cleanup-completion-wait] self=" << storage_id_
+                << " tasks=" << task_count
+                << " first_id=" << tasks.front().id
+                << " incomplete=" << storage_owner_maintenance_incomplete()
+                << " admission_limit=" << storage_owner_maintenance_admission_limit_
+                << std::endl;
+    }
     std::unique_lock<std::mutex> lock(storage_owner_maintenance_mutex_);
     storage_owner_maintenance_cv_.wait_for(
       lock, std::chrono::milliseconds(1));

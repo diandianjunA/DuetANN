@@ -24,6 +24,13 @@ struct CleanupScheduleLater {
   }
 };
 
+inline bool refinement_cleanup_gate_open(
+    bool pipeline, bool cleanup_pending, bool cleanup_ready) {
+  // Pipeline refinement produces the completions awaited by blocked cleanup.
+  // Only an already-runnable cleanup takes precedence over that progress.
+  return pipeline ? !cleanup_ready : !cleanup_pending;
+}
+
 inline bool cleanup_predecessors_durable(std::uint64_t sequence,
                                          std::uint64_t durable_sequence) {
   return sequence <= 1 || durable_sequence >= sequence - 1;

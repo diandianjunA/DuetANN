@@ -94,6 +94,8 @@ void MemoryNode::start_storage_owner_maintenance_runtime(const Configuration& co
                std::memory_order_acquire) == 0,
              "maintenance wake channels are already active");
   for (u32 worker_id = 0; worker_id < worker_count; ++worker_id) {
+    storage_owner_refinement_backpressure_[worker_id].store(
+      0, std::memory_order_relaxed);
     auto& channel = storage_owner_maintenance_wake_channels_[worker_id];
     lib_assert(channel.waiters.load(std::memory_order_acquire) == 0,
                "maintenance wake channel retained a waiter across restart");
@@ -237,6 +239,15 @@ void MemoryNode::start_storage_owner_maintenance_runtime(const Configuration& co
     0, std::memory_order_relaxed);
   storage_owner_stage2_home_scored_neighbors_.store(
     0, std::memory_order_relaxed);
+  storage_owner_stage2_score_home_wait_ns_.store(0, std::memory_order_relaxed);
+  storage_owner_stage2_graph_home_wait_ns_.store(0, std::memory_order_relaxed);
+  storage_owner_stage2_score_home_dispatches_.store(
+    0, std::memory_order_relaxed);
+  storage_owner_stage2_graph_home_dispatches_.store(
+    0, std::memory_order_relaxed);
+  storage_owner_stage2_dual_plane_dispatches_.store(
+    0, std::memory_order_relaxed);
+  storage_owner_stage2_dual_plane_waits_.store(0, std::memory_order_relaxed);
   storage_owner_stage2_graph_prefetch_issued_.store(
     0, std::memory_order_relaxed);
   storage_owner_stage2_graph_prefetch_hits_.store(
@@ -553,6 +564,8 @@ void MemoryNode::stop_storage_owner_maintenance_runtime() {
     if (!drained) {
       std::cerr << "[storage-owner] maintenance shutdown drain timed out; "
                    "final summary will report unfinished stage2 work"
+                << " unfinished_finalize_dependencies=["
+                << storage_owner_maintenance_dependencies_.dump() << "]"
                 << std::endl;
     }
   }
@@ -616,6 +629,13 @@ void MemoryNode::stop_storage_owner_maintenance_runtime() {
       ++cleanup_remaining;
       abandoned = StorageOwnerMaintenanceTask{};
     }
+  }
+
+  if (storage_owner_certificate_leases_ != nullptr) {
+    // Persistent reachability certificates are needed only while graph updates
+    // are active. All maintenance workers have stopped, so later pruning can no
+    // longer evict the published edges and the lease table can be reclaimed.
+    storage_owner_certificate_leases_->clear();
   }
 
   // Keep the joined worker vector intact until after the final observation:
@@ -1188,6 +1208,21 @@ void MemoryNode::log_storage_owner_maintenance_observation(size_t stage2_remaini
     stage2_home_score_rpc_request_bytes;
   telemetry_snapshot.stage2_home_score_rpc_response_bytes =
     stage2_home_score_rpc_response_bytes;
+  telemetry_snapshot.stage2_score_home_wait_ns =
+    storage_owner_stage2_score_home_wait_ns_.load(std::memory_order_relaxed);
+  telemetry_snapshot.stage2_graph_home_wait_ns =
+    storage_owner_stage2_graph_home_wait_ns_.load(std::memory_order_relaxed);
+  telemetry_snapshot.stage2_score_home_dispatches =
+    storage_owner_stage2_score_home_dispatches_.load(
+      std::memory_order_relaxed);
+  telemetry_snapshot.stage2_graph_home_dispatches =
+    storage_owner_stage2_graph_home_dispatches_.load(
+      std::memory_order_relaxed);
+  telemetry_snapshot.stage2_dual_plane_dispatches =
+    storage_owner_stage2_dual_plane_dispatches_.load(
+      std::memory_order_relaxed);
+  telemetry_snapshot.stage2_dual_plane_waits =
+    storage_owner_stage2_dual_plane_waits_.load(std::memory_order_relaxed);
   gpu_search::maintenance_telemetry::publish(
     reinterpret_cast<byte_t*>(control), telemetry_snapshot);
 
@@ -1585,6 +1620,8 @@ void MemoryNode::log_storage_owner_maintenance_observation(size_t stage2_remaini
                std::to_string(stage2_remaining) +
                " cleanup_remaining=" +
                std::to_string(cleanup_remaining) +
+               " cleanup_dependencies=" +
+               std::to_string(storage_owner_maintenance_dependencies_.size()) +
                " active_contexts=" +
                std::to_string(active_contexts) +
                " active_context_limit=" +
@@ -1606,6 +1643,43 @@ void MemoryNode::maybe_log_storage_owner_maintenance_observation() {
         std::lock_guard<std::mutex> lock(storage_owner_maintenance_mutex_);
         stage2_remaining = storage_owner_stage2_tasks_.size();
         cleanup_remaining = storage_owner_cleanup_tasks_.size();
+      }
+      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        std::lock_guard<std::mutex> lock(debug_cleanup_active_requests_mutex_);
+        const auto wall_now = std::chrono::steady_clock::now();
+        for (const auto& [thread, request] : debug_cleanup_active_requests_) {
+          if (wall_now - request.second >= std::chrono::seconds(5)) {
+            std::cerr << "[cleanup-handler-active] self=" << storage_id_
+                      << " thread=" << thread
+                      << " request_id=" << request.first
+                      << " age_ms=" << std::chrono::duration_cast<
+                        std::chrono::milliseconds>(wall_now - request.second).count()
+                      << std::endl;
+          }
+        }
+      }
+      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+          storage_owner_certificate_leases_ != nullptr) {
+        const auto leases = storage_owner_certificate_leases_->snapshot();
+        for (size_t index = 0; index < leases.size() && index < 16; ++index) {
+          const auto& [target, child, sequence] = leases[index];
+          const RemotePtr target_pointer{target};
+          const RemotePtr child_pointer{child};
+          std::string message = "[lease-snapshot] self=" +
+            std::to_string(storage_id_) + " target=" + std::to_string(target) +
+            " child=" + std::to_string(child) +
+            " sequence=" + std::to_string(sequence);
+          if (storage_node_pointer_addressable(target_pointer)) {
+            message += " target_header=" + std::to_string(
+              load_local_node_header_acquire(target_pointer));
+          }
+          if (local_shard(child_pointer.memory_node()) &&
+              storage_node_pointer_addressable(child_pointer)) {
+            message += " child_header=" + std::to_string(
+              load_local_node_header_acquire(child_pointer));
+          }
+          std::cerr << message << std::endl;
+        }
       }
       log_storage_owner_maintenance_observation(stage2_remaining, cleanup_remaining, false);
       return;

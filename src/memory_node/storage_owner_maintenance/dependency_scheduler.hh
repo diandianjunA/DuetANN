@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 #include "common/types.hh"
@@ -63,6 +64,20 @@ class MaintenanceDependencyTracker {
   std::size_t size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return sequences_.size();
+  }
+
+  // One line per unfinished finalize: "sequence:id:generation:target_raw".
+  // Used by drain diagnostics; ordering is unspecified.
+  std::string dump() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string out;
+    for (const auto& [sequence, key] : sequences_) {
+      if (!out.empty()) out += " ";
+      out += std::to_string(sequence) + ":" + std::to_string(key.id) + ":" +
+        std::to_string(key.generation) + ":" +
+        std::to_string(key.target_raw);
+    }
+    return out;
   }
 
   void clear() {

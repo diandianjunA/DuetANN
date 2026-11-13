@@ -1656,6 +1656,7 @@ bool run_dynamic_unknown_validation_test() {
   params.graph_entry_bytes = 32;
   params.graph_scratch = fixture->record;
   params.dynamic_graph_extent_enabled = 1;
+  params.dynamic_graph_extent_bootstrap_enabled = 0;
   params.dynamic_code_arena_states = &fixture->arena_state;
   params.dynamic_code_arena_capacity = 1;
 

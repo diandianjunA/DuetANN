@@ -35,6 +35,12 @@ int main() {
     .completion_physical_full_failures = 1,
     .active_stage2_contexts = 31,
     .active_stage2_context_limit = 32,
+    .stage2_score_home_wait_ns = 1001,
+    .stage2_graph_home_wait_ns = 1002,
+    .stage2_score_home_dispatches = 13,
+    .stage2_graph_home_dispatches = 14,
+    .stage2_dual_plane_dispatches = 15,
+    .stage2_dual_plane_waits = 16,
   };
   first.stage2_delay_histogram[6] = 12;
   telemetry::publish(control_page.data(), first);
@@ -61,6 +67,12 @@ int main() {
   assert(copied.completion_physical_full_failures == 1);
   assert(copied.active_stage2_contexts == 31);
   assert(copied.active_stage2_context_limit == 32);
+  assert(copied.stage2_score_home_wait_ns == 1001);
+  assert(copied.stage2_graph_home_wait_ns == 1002);
+  assert(copied.stage2_score_home_dispatches == 13);
+  assert(copied.stage2_graph_home_dispatches == 14);
+  assert(copied.stage2_dual_plane_dispatches == 15);
+  assert(copied.stage2_dual_plane_waits == 16);
 
   telemetry::Snapshot second = first;
   second.published_steady_ns = 200;

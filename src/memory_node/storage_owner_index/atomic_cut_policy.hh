@@ -7,6 +7,7 @@
 
 #include "common/types.hh"
 #include "memory_node/storage_owner_index/reconcile_reverse_policy.hh"
+#include "memory_node/storage_owner_index/vector_snapshot_policy.hh"
 #include "remote_pointer.hh"
 #include "service/storage_owner_protocol.hh"
 
@@ -77,7 +78,15 @@ AtomicCutPlan plan_atomic_cut(
         result.accepted = 1;
         break;
       case ReconcileReverseOpKind::add:
+      case ReconcileReverseOpKind::refine_add:
       case ReconcileReverseOpKind::acquire_certificate_lease:
+        break;
+      case ReconcileReverseOpKind::add_if_capacity:
+        if (plan.stable.size() >= degree_limit &&
+            !contains(span<const RemotePtr>{plan.stable},
+                      RemotePtr{op.new_candidate_raw})) {
+          result.accepted = 0;
+        }
         break;
       default:
         result.stale = 1;
@@ -104,8 +113,10 @@ AtomicCutPlan plan_atomic_cut(
   for (const auto& op : ops) {
     const auto kind = static_cast<ReconcileReverseOpKind>(op.kind);
     const RemotePtr candidate{op.new_candidate_raw};
-    if (kind == ReconcileReverseOpKind::add ||
-        kind == ReconcileReverseOpKind::acquire_certificate_lease) {
+    if (reconcile_kind_is_ordinary_add(kind) ||
+        kind == ReconcileReverseOpKind::acquire_certificate_lease ||
+        (kind == ReconcileReverseOpKind::add_if_capacity &&
+         plan.stable.size() < degree_limit)) {
       append_unique(candidate);
     }
     if (kind == ReconcileReverseOpKind::acquire_certificate_lease) {
@@ -115,12 +126,33 @@ AtomicCutPlan plan_atomic_cut(
       plan.acquired.emplace_back(candidate, op.placement_sequence);
     }
   }
+  if (mandatory.size() > degree_limit) {
+    vec<std::pair<RemotePtr, u64>> oldest_first(
+      active_leases.begin(), active_leases.end());
+    std::sort(oldest_first.begin(), oldest_first.end(),
+              [](const auto& lhs, const auto& rhs) {
+      if (lhs.second != rhs.second) return lhs.second < rhs.second;
+      return lhs.first.raw_address < rhs.first.raw_address;
+    });
+    for (const auto& [child, sequence] : oldest_first) {
+      if (released_here(child, sequence) ||
+          !contains(span<const RemotePtr>{mandatory}, child)) {
+        continue;
+      }
+      plan.released.emplace_back(child, sequence);
+      mandatory.erase(
+        std::remove(mandatory.begin(), mandatory.end(), child),
+        mandatory.end());
+      if (mandatory.size() <= degree_limit) break;
+    }
+  }
   if (mandatory.size() > degree_limit) return plan;
 
   if (candidates.size() <= degree_limit) {
     plan.stable = std::move(candidates);
   } else {
-    plan.stable = robust_prune(candidates);
+    plan.stable = invoke_reverse_prune(
+      robust_prune, candidates, current_stable.size());
     u64 forced = 0;
     if (!preserve_reconcile_mandatory_candidates(
           span<const RemotePtr>{candidates},
@@ -136,7 +168,8 @@ AtomicCutPlan plan_atomic_cut(
     ReconcileReverseResult& result = plan.results[index];
     const auto kind = static_cast<ReconcileReverseOpKind>(op.kind);
     const RemotePtr candidate{op.new_candidate_raw};
-    if (kind == ReconcileReverseOpKind::add) {
+    if (reconcile_kind_is_ordinary_add(kind) ||
+        kind == ReconcileReverseOpKind::add_if_capacity) {
       result.accepted = contains(span<const RemotePtr>{plan.stable}, candidate);
     } else if (kind == ReconcileReverseOpKind::acquire_certificate_lease) {
       result.accepted = contains(span<const RemotePtr>{plan.stable}, candidate);
@@ -149,6 +182,14 @@ AtomicCutPlan plan_atomic_cut(
   }
   plan.valid = true;
   return plan;
+}
+
+inline bool lease_merge_snapshot_requires_retry(
+    RemotePtr candidate, StableNodeSnapshotState state,
+    span<const RemotePtr> required_snapshots) {
+  return state != StableNodeSnapshotState::stable &&
+    std::find(required_snapshots.begin(), required_snapshots.end(), candidate) !=
+      required_snapshots.end();
 }
 
 }  // namespace memory_node_storage_owner_index_detail

@@ -32,7 +32,8 @@ inline constexpr u64 kMagic = 0x31544d43565344ULL;  // "DSVCMT1"
 // at actual submission/completion boundaries. Version 17 reports Stage2
 // contexts terminated after exhausting the permanent-failure retry window.
 // Version 18 reports LeaseMerge Atomic Cuts and cross-context fan-in.
-inline constexpr u32 kVersion = 18;
+// Version 19 records independently scheduled Stage2 score/graph home planes.
+inline constexpr u32 kVersion = 19;
 inline constexpr u32 kValidCounters = 1u << 0;
 inline constexpr size_t kLatencyBucketCount = 18;
 inline constexpr size_t kStage2PhaseCount = 6;
@@ -165,6 +166,12 @@ struct alignas(64) Snapshot {
   u64 lease_merge_cross_context_batches{};
   u64 lease_merge_cross_context_tasks{};
   u64 certificate_leases_active{};
+  u64 stage2_score_home_wait_ns{};
+  u64 stage2_graph_home_wait_ns{};
+  u64 stage2_score_home_dispatches{};
+  u64 stage2_graph_home_dispatches{};
+  u64 stage2_dual_plane_dispatches{};
+  u64 stage2_dual_plane_waits{};
 };
 
 static_assert(kSnapshotOffset == 192);

@@ -286,6 +286,7 @@ void test_dynamic_delete_args(const std::string& config_path) {
     "--write-insert-ratio", "0.5", "--write-upsert-ratio", "0",
     "--write-delete-ratio", "0.5", "--mixed-delete-mode", "inserted",
     "--dynamic-state-file", state_path.string(), "--seed-insert-count", "16",
+    "--hotspot-id-count", "4096",
     "--maintenance-timeout-ms", "900000", "--skip-maintenance-drain",
     "--report-json", "report.json",
   };
@@ -293,8 +294,18 @@ void test_dynamic_delete_args(const std::string& config_path) {
   assert(args.mixed_delete_mode == "inserted");
   assert(args.dynamic_state_file == state_path.string());
   assert(args.seed_insert_count == 16);
+  assert(args.hotspot_id_count == 4096);
   assert(args.maintenance_timeout_ms == 900000);
   assert(args.skip_maintenance_drain);
+  auto rate_limited_values = values;
+  for (auto& value : rate_limited_values) {
+    if (value == "fixed_threads") value = "write_rate_limited";
+  }
+  rate_limited_values.insert(rate_limited_values.end(), {
+    "--write-threads", "2", "--target-write-qps", "200"});
+  const auto rate_limited_args = parse(rate_limited_values);
+  assert(rate_limited_args.mixed_mode == "write_rate_limited");
+  assert(rate_limited_args.mixed_delete_mode == "inserted");
   auto rejected = values;
   for (auto& value : rejected) {
     if (value == "fixed_threads") value = "probability";
@@ -303,6 +314,52 @@ void test_dynamic_delete_args(const std::string& config_path) {
   rejected = values;
   for (auto& value : rejected) {
     if (value == "0.5") value = "0";
+  }
+  assert(parse_rejected(std::move(rejected)));
+}
+
+void test_single_reader_args(const std::string& config_path) {
+  const auto state_path = std::filesystem::temp_directory_path() /
+    "dvstor_breakdown_single_reader_args.bin";
+  const auto values = std::vector<std::string>{
+    "benchmark", "--service-config", config_path,
+    "--workload", "mixed", "--warmup-seconds", "0", "--measure-seconds", "0",
+    "--warmup-ops", "64", "--measure-ops", "256",
+    "--client-threads", "8", "--read-ratio", "0.5",
+    "--mixed-mode", "single_reader", "--single-reader-write-cycles-per-query", "4",
+    "--performance-query-file", "queries.u8bin",
+    "--write-insert-ratio", "0.5", "--write-upsert-ratio", "0",
+    "--write-delete-ratio", "0.5", "--mixed-delete-mode", "inserted",
+    "--dynamic-state-file", state_path.string(), "--seed-insert-count", "4096",
+    "--hotspot-id-count", "4096", "--report-json", "report.json",
+  };
+  const auto args = parse(values);
+  assert(args.mixed_mode == "single_reader");
+  assert(args.single_reader_write_cycles_per_query == 4);
+  assert(args.client_threads == 8);
+  assert(args.measure_seconds == 0 && args.measure_ops == 256);
+
+  auto rejected = values;
+  for (auto& value : rejected) {
+    if (value == "single_reader") value = "fixed_threads";
+  }
+  assert(parse_rejected(std::move(rejected)));
+  rejected = values;
+  for (auto& value : rejected) {
+    if (value == "4096") {
+      value = "4095";
+      break;
+    }
+  }
+  assert(parse_rejected(std::move(rejected)));
+  rejected = values;
+  for (auto& value : rejected) {
+    if (value == "4") value = "0";
+  }
+  assert(parse_rejected(std::move(rejected)));
+  rejected = values;
+  for (auto& value : rejected) {
+    if (value == "4") value = "4097";
   }
   assert(parse_rejected(std::move(rejected)));
 }
@@ -325,6 +382,12 @@ void test_dynamic_id_pool() {
   assert(restored.pop(std::chrono::steady_clock::now()) == 101);
   assert(restored.pop(std::chrono::steady_clock::now()) == 102);
   assert(!restored.pop(std::chrono::steady_clock::now()).has_value());
+  restored.push(103);
+  restored.push(104);
+  assert(restored.replace(103, 105));
+  assert(!restored.replace(999, 106));
+  assert(restored.pop(std::chrono::steady_clock::now()) == 105);
+  assert(restored.pop(std::chrono::steady_clock::now()) == 104);
   restored.save();
   std::filesystem::remove(path);
 }
@@ -348,6 +411,7 @@ int main() {
   test_paced_dispatcher();
   test_progress_deadline_records_zero_tail_and_excludes_drain();
   test_dynamic_delete_args(config_path.string());
+  test_single_reader_args(config_path.string());
   test_dynamic_id_pool();
   std::filesystem::remove(config_path);
   return 0;

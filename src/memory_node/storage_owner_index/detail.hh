@@ -3,13 +3,17 @@
 #include "memory_node/memory_node.hh"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 
 #include "common/index_path.hh"
 #include "gpu_search/index_format.hh"
 #include "memory_node/storage_owner_index/graph_pointer_validation.hh"
+#include "memory_node/storage_owner_index/snapshot_reuse_policy.hh"
 #include "vamana/idmap.hh"
 #include "vamana/storage_layout_resolver.hh"
 
@@ -25,6 +29,39 @@ using StorageOwnerPruneCandidateInfo =
 using StorageOwnerScoredSnapshot =
   memory_node_detail::StorageOwnerScoredSnapshot;
 using StorageOwnerThread = memory_node_detail::StorageOwnerThread;
+using ReverseSnapshotCache = SnapshotReuseCache<NodeSnapshot>;
+
+inline thread_local ReverseSnapshotCache* reverse_snapshot_cache = nullptr;
+
+class ReverseSnapshotReuseScope {
+public:
+  explicit ReverseSnapshotReuseScope(size_t expected)
+      : previous_(reverse_snapshot_cache) {
+    cache_.reserve(expected);
+    reverse_snapshot_cache = &cache_;
+  }
+  ReverseSnapshotReuseScope(const ReverseSnapshotReuseScope&) = delete;
+  ReverseSnapshotReuseScope& operator=(const ReverseSnapshotReuseScope&) = delete;
+  ~ReverseSnapshotReuseScope() { reverse_snapshot_cache = previous_; }
+
+private:
+  ReverseSnapshotCache cache_;
+  ReverseSnapshotCache* previous_;
+};
+
+inline bool reuse_reverse_snapshot(RemotePtr pointer, NodeSnapshot& snapshot) {
+  if (reverse_snapshot_cache == nullptr) return false;
+  const NodeSnapshot* cached = reverse_snapshot_cache->find(pointer);
+  if (cached == nullptr) return false;
+  snapshot = *cached;
+  return true;
+}
+
+inline void remember_reverse_snapshot(const NodeSnapshot& snapshot) {
+  if (reverse_snapshot_cache != nullptr) {
+    reverse_snapshot_cache->put(snapshot.rptr, snapshot);
+  }
+}
 
 inline size_t snapshot_buffer_bytes() {
   return memory_node_detail::storage_owner_snapshot_bytes();

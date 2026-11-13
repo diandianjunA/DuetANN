@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "gpu/gpunetio_probe.hh"
+#include "gpu/rdma_read_budget.hh"
 
 namespace gpu {
 
@@ -305,6 +306,19 @@ struct GpuNetioPersistentTransport::Impl {
       }
     }
 
+    const u8 read_depth = static_cast<u8>(read_atomic_depth(
+      cm.num_total_clients, qps_per_node,
+      std::min(context.max_qp_read_atomic(), context.max_qp_dest_read_atomic())));
+    if (read_depth == 0) {
+      throw std::invalid_argument("GPUNetIO read atomic depth is unavailable");
+    }
+    std::cerr << "[STATUS]: GPUNetIO read atomic depth="
+              << static_cast<u32>(read_depth)
+              << " clients=" << cm.num_total_clients
+              << " qps_per_node=" << qps_per_node
+              << " gpu_read_budget_per_storage=" << kPerStorageReadAtomicBudget
+              << std::endl;
+
     const size_t control_bytes =
       2 * sizeof(uint64_t) + sizeof(int) +
       kGpuNetioProbeDebugValueCount * sizeof(uint64_t) + 256;
@@ -491,18 +505,17 @@ struct GpuNetioPersistentTransport::Impl {
                                   doca_verbs_qp_get_qpn(qp),
                                   0,
                                   context.get_active_mtu(),
-                                  static_cast<u8>(context.max_qp_read_atomic()),
-                                  static_cast<u8>(context.max_qp_dest_read_atomic())};
+                                  read_depth,
+                                  read_depth};
       QPInfo remote_info{};
       exchange_qp_info(context, *cm.server_qps[server], local_info, remote_info);
       qp_modify_to_rtr(
         verbs_context,
         qp,
         context.get_active_mtu(),
-        static_cast<u8>(context.max_qp_dest_read_atomic()),
+        read_depth,
         remote_info);
-      qp_modify_to_rts(
-        qp, static_cast<u8>(context.max_qp_read_atomic()), remote_info);
+      qp_modify_to_rts(qp, read_depth, remote_info);
 
       gpu_qps.push_back(gpu_qp);
       gpu_qp_devices_host.push_back(gpu_qp_dev);
@@ -542,9 +555,12 @@ struct GpuNetioPersistentTransport::Impl {
 #if defined(DVSTOR_HAVE_MLX5DV_REG_DMABUF_MR)
       registered_mr = mlx5dv_reg_dmabuf_mr(
         ibv_pd, 0, registered_bytes, 0, dmabuf_fd, mr_access, 0);
-#else
+#elif defined(DVSTOR_HAVE_IBV_REG_DMABUF_MR)
       registered_mr = ibv_reg_dmabuf_mr(
         ibv_pd, 0, registered_bytes, 0, dmabuf_fd, mr_access);
+#else
+      registered_mr = nullptr;
+      errno = ENOTSUP;
 #endif
       local_iova_base = reinterpret_cast<uint64_t>(registered_base);
     }

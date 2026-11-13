@@ -1,1 +1,0 @@
-../common/start_all_memory_nodes.sh

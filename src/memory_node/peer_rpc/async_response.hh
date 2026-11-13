@@ -144,6 +144,12 @@ public:
     return probe_telemetry_;
   }
 
+  [[nodiscard]] int debug_response_state(u64 request_id) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const size_t slot_index = find_slot_locked(request_id);
+    return slot_index == npos ? -1 : static_cast<int>(slots_[slot_index].state);
+  }
+
   PeerResponseRegistration register_request(
       u64 request_id,
       u32 expected_shard,

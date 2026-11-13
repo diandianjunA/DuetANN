@@ -256,7 +256,7 @@ void PersistentSearchEngine::Impl::report_direct_path_failure() {
   }
   std::cerr
             << "; strict query mode rejects the query\n";
-  engine.telemetry_.direct_path_failures.fetch_add(1, std::memory_order_relaxed);
+  engine.telemetry_.direct_path_failures.fetch_add_single_writer(1, std::memory_order_relaxed);
   mark_unhealthy(std::string(graph_snapshot_error
                  ? "graph snapshot validation failed with status "
                  : "GPUNetIO direct read failed with status ") +
@@ -370,7 +370,7 @@ void PersistentSearchEngine::Impl::completion_loop() {
           bool expected = false;
           if (direct_failure_logged.compare_exchange_strong(
                 expected, true, std::memory_order_acq_rel)) {
-            engine.telemetry_.direct_path_failures.fetch_add(
+            engine.telemetry_.direct_path_failures.fetch_add_single_writer(
               1, std::memory_order_relaxed);
           }
           mark_unhealthy(message.str());
@@ -404,10 +404,10 @@ void PersistentSearchEngine::Impl::completion_loop() {
       query_failure_reason(completion.diagnostic);
     const u32 route_snapshot_retries =
       query_route_snapshot_retries(completion.diagnostic);
-    engine.telemetry_.centroid_route_query_retries.fetch_add(
+    engine.telemetry_.centroid_route_query_retries.fetch_add_single_writer(
       route_snapshot_retries, std::memory_order_relaxed);
     if (failure_reason == QueryFailureReason::route_snapshot_timeout) {
-      engine.telemetry_.centroid_route_query_timeouts.fetch_add(
+      engine.telemetry_.centroid_route_query_timeouts.fetch_add_single_writer(
         1, std::memory_order_relaxed);
     }
     const auto submitted_at = state.submitted_at;
@@ -603,123 +603,123 @@ void PersistentSearchEngine::Impl::completion_loop() {
       }
       state.phase.notify_all();
     }
-    engine.telemetry_.queries_completed.fetch_add(1, std::memory_order_relaxed);
-    engine.telemetry_.gpu_active_ns.fetch_add(gpu_ns, std::memory_order_relaxed);
-    engine.telemetry_.gpu_prepare_ns.fetch_add(
+    engine.telemetry_.queries_completed.fetch_add_single_writer(1, std::memory_order_relaxed);
+    engine.telemetry_.gpu_active_ns.fetch_add_single_writer(gpu_ns, std::memory_order_relaxed);
+    engine.telemetry_.gpu_prepare_ns.fetch_add_single_writer(
       phase_ns(completion.prepare_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_graph_ns.fetch_add(
+    engine.telemetry_.gpu_graph_ns.fetch_add_single_writer(
       phase_ns(completion.graph_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_score_ns.fetch_add(
+    engine.telemetry_.gpu_score_ns.fetch_add_single_writer(
       phase_ns(completion.score_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_beam_ns.fetch_add(
+    engine.telemetry_.gpu_beam_ns.fetch_add_single_writer(
       phase_ns(completion.beam_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_exact_ns.fetch_add(
+    engine.telemetry_.gpu_exact_ns.fetch_add_single_writer(
       phase_ns(completion.exact_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_beam_selection_ns.fetch_add(
+    engine.telemetry_.gpu_beam_selection_ns.fetch_add_single_writer(
       phase_ns(completion.beam_selection_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_rdma_issue_ns.fetch_add(
+    engine.telemetry_.gpu_rdma_issue_ns.fetch_add_single_writer(
       phase_ns(completion.rdma_issue_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_frontier_preview_ns.fetch_add(
+    engine.telemetry_.gpu_frontier_preview_ns.fetch_add_single_writer(
       phase_ns(completion.frontier_preview_cycles),
       std::memory_order_relaxed);
-    engine.telemetry_.gpu_frontier_prepare_ns.fetch_add(
+    engine.telemetry_.gpu_frontier_prepare_ns.fetch_add_single_writer(
       phase_ns(completion.frontier_prepare_cycles),
       std::memory_order_relaxed);
-    engine.telemetry_.gpu_frontier_enqueue_ns.fetch_add(
+    engine.telemetry_.gpu_frontier_enqueue_ns.fetch_add_single_writer(
       phase_ns(completion.frontier_enqueue_cycles),
       std::memory_order_relaxed);
-    engine.telemetry_.gpu_frontier_prefix_to_beam_publish_ns.fetch_add(
+    engine.telemetry_.gpu_frontier_prefix_to_beam_publish_ns.fetch_add_single_writer(
       phase_ns(completion.frontier_prefix_to_beam_publish_cycles),
       std::memory_order_relaxed);
-    engine.telemetry_.gpu_frontier_issue_to_beam_publish_ns.fetch_add(
+    engine.telemetry_.gpu_frontier_issue_to_beam_publish_ns.fetch_add_single_writer(
       phase_ns(completion.frontier_issue_to_beam_publish_cycles),
       std::memory_order_relaxed);
-    engine.telemetry_.gpu_rdma_wait_ns.fetch_add(
+    engine.telemetry_.gpu_rdma_wait_ns.fetch_add_single_writer(
       phase_ns(completion.rdma_wait_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_graph_validation_ns.fetch_add(
+    engine.telemetry_.gpu_graph_validation_ns.fetch_add_single_writer(
       phase_ns(completion.graph_validation_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_neighbor_decode_ns.fetch_add(
+    engine.telemetry_.gpu_neighbor_decode_ns.fetch_add_single_writer(
       phase_ns(completion.neighbor_decode_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_pq_score_ns.fetch_add(
+    engine.telemetry_.gpu_pq_score_ns.fetch_add_single_writer(
       phase_ns(completion.pq_score_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_visited_ns.fetch_add(
+    engine.telemetry_.gpu_visited_ns.fetch_add_single_writer(
       phase_ns(completion.visited_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_beam_merge_ns.fetch_add(
+    engine.telemetry_.gpu_beam_merge_ns.fetch_add_single_writer(
       phase_ns(completion.beam_merge_cycles), std::memory_order_relaxed);
-    engine.telemetry_.gpu_beam_merge_prepare_ns.fetch_add(
+    engine.telemetry_.gpu_beam_merge_prepare_ns.fetch_add_single_writer(
       phase_ns(completion.beam_merge_prepare_cycles),
       std::memory_order_relaxed);
-    engine.telemetry_.gpu_beam_merge_sort_ns.fetch_add(
+    engine.telemetry_.gpu_beam_merge_sort_ns.fetch_add_single_writer(
       phase_ns(completion.beam_merge_sort_cycles),
       std::memory_order_relaxed);
-    engine.telemetry_.gpu_beam_merge_materialize_ns.fetch_add(
+    engine.telemetry_.gpu_beam_merge_materialize_ns.fetch_add_single_writer(
       phase_ns(completion.beam_merge_materialize_cycles),
       std::memory_order_relaxed);
-    engine.telemetry_.completion_wait_ns.fetch_add(end_to_end_ns,
+    engine.telemetry_.completion_wait_ns.fetch_add_single_writer(end_to_end_ns,
                                                    std::memory_order_relaxed);
     const u64 physical_graph_reads =
       static_cast<u64>(completion.graph_live_extent_reads) +
       completion.graph_full_record_reads;
-    engine.telemetry_.graph_shard_batches.fetch_add(
+    engine.telemetry_.graph_shard_batches.fetch_add_single_writer(
       completion.remote_batches, std::memory_order_relaxed);
-    engine.telemetry_.rdma_read_ops.fetch_add(
+    engine.telemetry_.rdma_read_ops.fetch_add_single_writer(
       static_cast<u64>(completion.exact_vectors) + physical_graph_reads +
         completion.dynamic_code_reads,
       std::memory_order_relaxed);
-    engine.telemetry_.rdma_read_bytes.fetch_add(
+    engine.telemetry_.rdma_read_bytes.fetch_add_single_writer(
       static_cast<u64>(completion.exact_vectors) * node_record_bytes +
       completion.graph_read_bytes +
       static_cast<u64>(completion.dynamic_code_reads) *
         dynamic_code_record_bytes,
       std::memory_order_relaxed);
     if (physical_graph_reads > completion.remote_batches) {
-      engine.telemetry_.rdma_merged_requests.fetch_add(
+      engine.telemetry_.rdma_merged_requests.fetch_add_single_writer(
         physical_graph_reads - completion.remote_batches,
         std::memory_order_relaxed);
     }
-    engine.telemetry_.exact_vector_reads.fetch_add(completion.exact_vectors,
+    engine.telemetry_.exact_vector_reads.fetch_add_single_writer(completion.exact_vectors,
                                                    std::memory_order_relaxed);
-    engine.telemetry_.exact_snapshot_train_batches.fetch_add(
+    engine.telemetry_.exact_snapshot_train_batches.fetch_add_single_writer(
       completion.exact_snapshot_train_batches,
       std::memory_order_relaxed);
-    engine.telemetry_.exact_snapshot_train_fallbacks.fetch_add(
+    engine.telemetry_.exact_snapshot_train_fallbacks.fetch_add_single_writer(
       completion.exact_snapshot_train_fallbacks,
       std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_candidates.fetch_add(
+    engine.telemetry_.dynamic_code_candidates.fetch_add_single_writer(
       completion.dynamic_code_candidates, std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_reads.fetch_add(
+    engine.telemetry_.dynamic_code_reads.fetch_add_single_writer(
       completion.dynamic_code_reads, std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_read_bytes.fetch_add(
+    engine.telemetry_.dynamic_code_read_bytes.fetch_add_single_writer(
       static_cast<u64>(completion.dynamic_code_reads) *
         dynamic_code_record_bytes,
       std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_incarnation_rejects.fetch_add(
+    engine.telemetry_.dynamic_code_incarnation_rejects.fetch_add_single_writer(
       completion.dynamic_code_incarnation_rejects,
       std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_wait_ns.fetch_add(
+    engine.telemetry_.dynamic_code_wait_ns.fetch_add_single_writer(
       phase_ns(completion.dynamic_code_cycles),
       std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_cache_hits.fetch_add(
+    engine.telemetry_.dynamic_code_cache_hits.fetch_add_single_writer(
       completion.dynamic_code_cache_hits, std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_batch_deduplicated.fetch_add(
+    engine.telemetry_.dynamic_code_batch_deduplicated.fetch_add_single_writer(
       completion.dynamic_code_batch_deduplicated,
       std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_cache_publish_successes.fetch_add(
+    engine.telemetry_.dynamic_code_cache_publish_successes.fetch_add_single_writer(
       completion.dynamic_code_cache_publish_successes,
       std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_cache_publish_races.fetch_add(
+    engine.telemetry_.dynamic_code_cache_publish_races.fetch_add_single_writer(
       completion.dynamic_code_cache_publish_races,
       std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_cache_lookup_probe_exhaustions.fetch_add(
+    engine.telemetry_.dynamic_code_cache_lookup_probe_exhaustions.fetch_add_single_writer(
       completion.dynamic_code_cache_lookup_probe_exhaustions,
       std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_cache_publish_probe_exhaustions.fetch_add(
+    engine.telemetry_.dynamic_code_cache_publish_probe_exhaustions.fetch_add_single_writer(
       completion.dynamic_code_cache_publish_probe_exhaustions,
       std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_cache_lookup_probes.fetch_add(
+    engine.telemetry_.dynamic_code_cache_lookup_probes.fetch_add_single_writer(
       completion.dynamic_code_cache_lookup_probes,
       std::memory_order_relaxed);
-    engine.telemetry_.dynamic_code_cache_occupied.fetch_add(
+    engine.telemetry_.dynamic_code_cache_occupied.fetch_add_single_writer(
       completion.dynamic_code_cache_first_occupancies,
       std::memory_order_relaxed);
     u64 observed_max =
@@ -731,165 +731,169 @@ void PersistentSearchEngine::Impl::completion_loop() {
                 observed_max, completion.dynamic_code_cache_max_lookup_probes,
                 std::memory_order_relaxed, std::memory_order_relaxed)) {
     }
-    engine.telemetry_.graph_page_requests.fetch_add(completion.remote_pages,
+    engine.telemetry_.graph_page_requests.fetch_add_single_writer(completion.remote_pages,
                                                     std::memory_order_relaxed);
-    engine.telemetry_.graph_read_retries.fetch_add(
+    engine.telemetry_.graph_read_retries.fetch_add_single_writer(
       completion.graph_read_retries, std::memory_order_relaxed);
-    engine.telemetry_.graph_read_bytes.fetch_add(
+    engine.telemetry_.graph_read_bytes.fetch_add_single_writer(
       completion.graph_read_bytes, std::memory_order_relaxed);
-    engine.telemetry_.graph_live_extent_reads.fetch_add(
+    engine.telemetry_.graph_live_extent_reads.fetch_add_single_writer(
       completion.graph_live_extent_reads, std::memory_order_relaxed);
-    engine.telemetry_.graph_full_record_reads.fetch_add(
+    engine.telemetry_.graph_full_record_reads.fetch_add_single_writer(
       completion.graph_full_record_reads, std::memory_order_relaxed);
-    engine.telemetry_.graph_extent_fallback_reads.fetch_add(
+    engine.telemetry_.graph_extent_fallback_reads.fetch_add_single_writer(
       completion.graph_extent_fallback_reads, std::memory_order_relaxed);
-    engine.telemetry_.graph_extent_underhint_reads.fetch_add(
+    engine.telemetry_.graph_extent_underhint_reads.fetch_add_single_writer(
       completion.graph_extent_underhint_reads, std::memory_order_relaxed);
-    engine.telemetry_.graph_extent_hint_promotions.fetch_add(
+    engine.telemetry_.graph_extent_hint_promotions.fetch_add_single_writer(
       completion.graph_extent_hint_promotions, std::memory_order_relaxed);
-    engine.telemetry_.expanded_parent_count.fetch_add(
+    engine.telemetry_.graph_full_record_avoidance_hits.fetch_add_single_writer(
+      completion.graph_full_record_avoidance_hits, std::memory_order_relaxed);
+    engine.telemetry_.graph_full_record_avoidance_misses.fetch_add_single_writer(
+      completion.graph_full_record_avoidance_misses, std::memory_order_relaxed);
+    engine.telemetry_.expanded_parent_count.fetch_add_single_writer(
       completion.expanded_parent_count, std::memory_order_relaxed);
-    engine.telemetry_.expanded_neighbor_count_sum.fetch_add(
+    engine.telemetry_.expanded_neighbor_count_sum.fetch_add_single_writer(
       completion.expanded_neighbor_count_sum, std::memory_order_relaxed);
     for (u32 bucket = 0; bucket < kGraphDegreeHistogramBuckets; ++bucket) {
-      engine.telemetry_.expanded_degree_histogram[bucket].fetch_add(
+      engine.telemetry_.expanded_degree_histogram[bucket].fetch_add_single_writer(
         completion.expanded_degree_histogram[bucket],
         std::memory_order_relaxed);
     }
-    engine.telemetry_.dynamic_expanded_parent_count.fetch_add(
+    engine.telemetry_.dynamic_expanded_parent_count.fetch_add_single_writer(
       completion.dynamic_expanded_parent_count, std::memory_order_relaxed);
-    engine.telemetry_.dynamic_expanded_neighbor_count_sum.fetch_add(
+    engine.telemetry_.dynamic_expanded_neighbor_count_sum.fetch_add_single_writer(
       completion.dynamic_expanded_neighbor_count_sum,
       std::memory_order_relaxed);
     for (u32 bucket = 0; bucket < kGraphDegreeHistogramBuckets; ++bucket) {
-      engine.telemetry_.dynamic_expanded_degree_histogram[bucket].fetch_add(
+      engine.telemetry_.dynamic_expanded_degree_histogram[bucket].fetch_add_single_writer(
         completion.dynamic_expanded_degree_histogram[bucket],
         std::memory_order_relaxed);
     }
-    engine.telemetry_.dynamic_graph_short_reads.fetch_add(
+    engine.telemetry_.dynamic_graph_short_reads.fetch_add_single_writer(
       completion.dynamic_graph_short_reads, std::memory_order_relaxed);
-    engine.telemetry_.dynamic_graph_full_reads.fetch_add(
+    engine.telemetry_.dynamic_graph_full_reads.fetch_add_single_writer(
       completion.dynamic_graph_full_reads, std::memory_order_relaxed);
-    engine.telemetry_.dynamic_graph_read_bytes.fetch_add(
+    engine.telemetry_.dynamic_graph_read_bytes.fetch_add_single_writer(
       completion.dynamic_graph_read_bytes, std::memory_order_relaxed);
-    engine.telemetry_.dynamic_graph_fallback_reads.fetch_add(
+    engine.telemetry_.dynamic_graph_fallback_reads.fetch_add_single_writer(
       completion.dynamic_graph_fallback_reads, std::memory_order_relaxed);
-    engine.telemetry_.dynamic_graph_hint_promotions.fetch_add(
+    engine.telemetry_.dynamic_graph_hint_promotions.fetch_add_single_writer(
       completion.dynamic_graph_hint_promotions, std::memory_order_relaxed);
-    engine.telemetry_.dynamic_graph_hint_demotions.fetch_add(
+    engine.telemetry_.dynamic_graph_hint_demotions.fetch_add_single_writer(
       completion.dynamic_graph_hint_demotions, std::memory_order_relaxed);
-    engine.telemetry_.logical_expansions.fetch_add(
+    engine.telemetry_.logical_expansions.fetch_add_single_writer(
       completion.logical_expansions, std::memory_order_relaxed);
-    engine.telemetry_.critical_graph_reads.fetch_add(
+    engine.telemetry_.critical_graph_reads.fetch_add_single_writer(
       completion.critical_graph_reads, std::memory_order_relaxed);
-    engine.telemetry_.critical_graph_bytes.fetch_add(
+    engine.telemetry_.critical_graph_bytes.fetch_add_single_writer(
       completion.critical_graph_bytes, std::memory_order_relaxed);
-    engine.telemetry_.speculative_graph_reads.fetch_add(
+    engine.telemetry_.speculative_graph_reads.fetch_add_single_writer(
       completion.speculative_graph_reads, std::memory_order_relaxed);
-    engine.telemetry_.speculative_graph_bytes.fetch_add(
+    engine.telemetry_.speculative_graph_bytes.fetch_add_single_writer(
       completion.speculative_graph_bytes, std::memory_order_relaxed);
-    engine.telemetry_.speculative_wasted_bytes.fetch_add(
+    engine.telemetry_.speculative_wasted_bytes.fetch_add_single_writer(
       completion.speculative_wasted_bytes, std::memory_order_relaxed);
-    engine.telemetry_.terminal_exact_cache_wasted_bytes.fetch_add(
+    engine.telemetry_.terminal_exact_cache_wasted_bytes.fetch_add_single_writer(
       completion.terminal_exact_cache_wasted_bytes,
       std::memory_order_relaxed);
-    engine.telemetry_.rdma_completion_latency_ns.fetch_add(
+    engine.telemetry_.rdma_completion_latency_ns.fetch_add_single_writer(
       completion.rdma_completion_latency_ns, std::memory_order_relaxed);
-    engine.telemetry_.speculative_completion_latency_ns.fetch_add(
+    engine.telemetry_.speculative_completion_latency_ns.fetch_add_single_writer(
       completion.speculative_completion_latency_ns,
       std::memory_order_relaxed);
-    engine.telemetry_.rdma_completion_groups.fetch_add(
+    engine.telemetry_.rdma_completion_groups.fetch_add_single_writer(
       completion.rdma_completion_groups, std::memory_order_relaxed);
-    engine.telemetry_.speculative_completion_groups.fetch_add(
+    engine.telemetry_.speculative_completion_groups.fetch_add_single_writer(
       completion.speculative_completion_groups,
       std::memory_order_relaxed);
-    engine.telemetry_.speculative_arrived.fetch_add(
+    engine.telemetry_.speculative_arrived.fetch_add_single_writer(
       completion.speculative_arrived, std::memory_order_relaxed);
-    engine.telemetry_.speculative_promoted.fetch_add(
+    engine.telemetry_.speculative_promoted.fetch_add_single_writer(
       completion.speculative_promoted, std::memory_order_relaxed);
-    engine.telemetry_.speculative_stale.fetch_add(
+    engine.telemetry_.speculative_stale.fetch_add_single_writer(
       completion.speculative_stale, std::memory_order_relaxed);
-    engine.telemetry_.speculative_queue_rejects.fetch_add(
+    engine.telemetry_.speculative_queue_rejects.fetch_add_single_writer(
       completion.speculative_queue_rejects, std::memory_order_relaxed);
-    engine.telemetry_.core_prefetch_reads.fetch_add(
+    engine.telemetry_.core_prefetch_reads.fetch_add_single_writer(
       completion.core_prefetch_reads, std::memory_order_relaxed);
-    engine.telemetry_.core_prefetch_bytes.fetch_add(
+    engine.telemetry_.core_prefetch_bytes.fetch_add_single_writer(
       completion.core_prefetch_bytes, std::memory_order_relaxed);
-    engine.telemetry_.core_prefetch_arrived.fetch_add(
+    engine.telemetry_.core_prefetch_arrived.fetch_add_single_writer(
       completion.core_prefetch_arrived, std::memory_order_relaxed);
-    engine.telemetry_.core_prefetch_promoted.fetch_add(
+    engine.telemetry_.core_prefetch_promoted.fetch_add_single_writer(
       completion.core_prefetch_promoted, std::memory_order_relaxed);
-    engine.telemetry_.core_prefetch_stale.fetch_add(
+    engine.telemetry_.core_prefetch_stale.fetch_add_single_writer(
       completion.core_prefetch_stale, std::memory_order_relaxed);
-    engine.telemetry_.core_prefetch_queue_rejects.fetch_add(
+    engine.telemetry_.core_prefetch_queue_rejects.fetch_add_single_writer(
       completion.core_prefetch_queue_rejects, std::memory_order_relaxed);
-    engine.telemetry_.core_prefetch_waves.fetch_add(
+    engine.telemetry_.core_prefetch_waves.fetch_add_single_writer(
       completion.core_prefetch_waves, std::memory_order_relaxed);
-    engine.telemetry_.core_ready_waves.fetch_add(
+    engine.telemetry_.core_ready_waves.fetch_add_single_writer(
       completion.core_ready_waves, std::memory_order_relaxed);
-    engine.telemetry_.terminal_exact_cache_attempted_queries.fetch_add(
+    engine.telemetry_.terminal_exact_cache_attempted_queries.fetch_add_single_writer(
       completion.terminal_exact_cache_attempted_queries,
       std::memory_order_relaxed);
-    engine.telemetry_.terminal_exact_cache_issued_records.fetch_add(
+    engine.telemetry_.terminal_exact_cache_issued_records.fetch_add_single_writer(
       completion.terminal_exact_cache_issued_records,
       std::memory_order_relaxed);
-    engine.telemetry_.terminal_exact_cache_promoted_records.fetch_add(
+    engine.telemetry_.terminal_exact_cache_promoted_records.fetch_add_single_writer(
       completion.terminal_exact_cache_promoted_records,
       std::memory_order_relaxed);
-    engine.telemetry_.terminal_exact_cache_queue_rejects.fetch_add(
+    engine.telemetry_.terminal_exact_cache_queue_rejects.fetch_add_single_writer(
       completion.terminal_exact_cache_queue_rejects,
       std::memory_order_relaxed);
-    engine.telemetry_.terminal_exact_cache_miss_records.fetch_add(
+    engine.telemetry_.terminal_exact_cache_miss_records.fetch_add_single_writer(
       completion.terminal_exact_cache_miss_records,
       std::memory_order_relaxed);
-    engine.telemetry_.completion_score_batches.fetch_add(
+    engine.telemetry_.completion_score_batches.fetch_add_single_writer(
       completion.completion_score_batches, std::memory_order_relaxed);
-    engine.telemetry_.completion_score_candidates.fetch_add(
+    engine.telemetry_.completion_score_candidates.fetch_add_single_writer(
       completion.completion_score_candidates, std::memory_order_relaxed);
-    engine.telemetry_.frontier_reusable_certificates.fetch_add(
+    engine.telemetry_.frontier_reusable_certificates.fetch_add_single_writer(
       completion.frontier_reusable_certificates,
       std::memory_order_relaxed);
-    engine.telemetry_.frontier_streamed_candidate_runs.fetch_add(
+    engine.telemetry_.frontier_streamed_candidate_runs.fetch_add_single_writer(
       completion.frontier_streamed_candidate_runs,
       std::memory_order_relaxed);
-    engine.telemetry_.ordered_score_batches.fetch_add(
+    engine.telemetry_.ordered_score_batches.fetch_add_single_writer(
       completion.ordered_score_batches, std::memory_order_relaxed);
-    engine.telemetry_.ordered_score_candidates.fetch_add(
+    engine.telemetry_.ordered_score_candidates.fetch_add_single_writer(
       completion.ordered_score_candidates, std::memory_order_relaxed);
     if (completion.status == 0) {
-      engine.telemetry_.ooo_bypassed_parents.fetch_add(
+      engine.telemetry_.ooo_bypassed_parents.fetch_add_single_writer(
         completion.frontier_telemetry_reserved1,
         std::memory_order_relaxed);
     }
-    engine.telemetry_.frontier_reusable_prefix_ranks.fetch_add(
+    engine.telemetry_.frontier_reusable_prefix_ranks.fetch_add_single_writer(
       completion.frontier_reusable_prefix_ranks,
       std::memory_order_relaxed);
-    engine.telemetry_.frontier_reusable_full_prefix_certificates.fetch_add(
+    engine.telemetry_.frontier_reusable_full_prefix_certificates.fetch_add_single_writer(
       completion.frontier_reusable_full_prefix_certificates,
       std::memory_order_relaxed);
-    engine.telemetry_.frontier_reusable_issued_certificates.fetch_add(
+    engine.telemetry_.frontier_reusable_issued_certificates.fetch_add_single_writer(
       completion.frontier_reusable_issued_certificates,
       std::memory_order_relaxed);
     if (completion.status == 0) {
-      engine.telemetry_.frontier_certificate_rejects.fetch_add(
+      engine.telemetry_.frontier_certificate_rejects.fetch_add_single_writer(
         completion.frontier_telemetry_reserved0,
         std::memory_order_relaxed);
     }
-    engine.telemetry_.issue_epochs.fetch_add(
+    engine.telemetry_.issue_epochs.fetch_add_single_writer(
       completion.issue_epochs, std::memory_order_relaxed);
-    engine.telemetry_.commit_epochs.fetch_add(
+    engine.telemetry_.commit_epochs.fetch_add_single_writer(
       completion.commit_epochs, std::memory_order_relaxed);
-    engine.telemetry_.issue_width_sum.fetch_add(
+    engine.telemetry_.issue_width_sum.fetch_add_single_writer(
       completion.issue_width_sum, std::memory_order_relaxed);
-    engine.telemetry_.issue_width_capacity_sum.fetch_add(
+    engine.telemetry_.issue_width_capacity_sum.fetch_add_single_writer(
       completion.issue_width_capacity_sum, std::memory_order_relaxed);
-    engine.telemetry_.commit_width_sum.fetch_add(
+    engine.telemetry_.commit_width_sum.fetch_add_single_writer(
       completion.commit_width_sum, std::memory_order_relaxed);
-    engine.telemetry_.critical_rob_hits.fetch_add(
+    engine.telemetry_.critical_rob_hits.fetch_add_single_writer(
       completion.critical_rob_hits, std::memory_order_relaxed);
-    engine.telemetry_.critical_misses.fetch_add(
+    engine.telemetry_.critical_misses.fetch_add_single_writer(
       completion.critical_misses, std::memory_order_relaxed);
-    engine.telemetry_.speculative_wait_ns.fetch_add(
+    engine.telemetry_.speculative_wait_ns.fetch_add_single_writer(
       phase_ns(completion.speculative_wait_cycles),
       std::memory_order_relaxed);
     u64 observed_max_issue_width =
@@ -906,9 +910,9 @@ void PersistentSearchEngine::Impl::completion_loop() {
              observed_max_commit_width, completion.max_commit_width,
              std::memory_order_relaxed, std::memory_order_relaxed)) {
     }
-    engine.telemetry_.graph_dependency_rounds.fetch_add(
+    engine.telemetry_.graph_dependency_rounds.fetch_add_single_writer(
       completion.graph_rounds, std::memory_order_relaxed);
-    engine.telemetry_.graph_route_hits.fetch_add(completion.route_hits,
+    engine.telemetry_.graph_route_hits.fetch_add_single_writer(completion.route_hits,
                                                  std::memory_order_relaxed);
   }
 }

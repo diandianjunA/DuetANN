@@ -1,12 +1,25 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
+#include <type_traits>
 #include <utility>
 
 #include "common/types.hh"
 #include "remote_pointer.hh"
 
 namespace memory_node_storage_owner_index_detail {
+
+template <class Prune>
+auto invoke_reverse_prune(Prune&& prune,
+                          const vec<RemotePtr>& candidates,
+                          size_t existing_count) {
+  if constexpr (std::is_invocable_v<Prune, const vec<RemotePtr>&, size_t>) {
+    return prune(candidates, existing_count);
+  } else {
+    return prune(candidates);
+  }
+}
 
 // Predicate form of the common selection loop.  The predicate receives the
 // already-computed source distance, allowing an implementation to decide the
@@ -45,6 +58,75 @@ void select_alpha_robust_pruned_sorted_by_pair_predicate(
       selected.push_back(pointer_of(candidate));
       selected_indices.push_back(candidate_index);
     }
+  }
+}
+
+template <class Candidate, class ExistingOf, class PointerOf,
+          class SourceDistanceOf, class PairPrunes>
+void incremental_robust_pruned_sorted_by_pair_predicate(
+    const span<const Candidate> sorted_candidates,
+    ExistingOf&& existing_of,
+    const u32 result_limit,
+    PointerOf&& pointer_of,
+    SourceDistanceOf&& source_distance_of,
+    PairPrunes&& pair_prunes,
+    vec<RemotePtr>& selected,
+    vec<size_t>& selected_indices) {
+  selected.clear();
+  selected_indices.clear();
+  if (result_limit == 0) return;
+  selected.reserve(result_limit);
+  selected_indices.reserve(result_limit);
+  for (size_t index = 0; index < sorted_candidates.size(); ++index) {
+    const Candidate& candidate = sorted_candidates[index];
+    if (existing_of(candidate)) {
+      if (selected.size() < result_limit) {
+        selected.push_back(pointer_of(candidate));
+        selected_indices.push_back(index);
+      }
+      continue;
+    }
+    const auto source_distance = source_distance_of(candidate);
+    if (selected.size() == result_limit &&
+        source_distance >= source_distance_of(
+          sorted_candidates[selected_indices.back()])) {
+      continue;
+    }
+    bool pruned = false;
+    for (const size_t selected_index : selected_indices) {
+      if (source_distance_of(sorted_candidates[selected_index]) <=
+            source_distance &&
+          pair_prunes(candidate, sorted_candidates[selected_index],
+                      source_distance)) {
+        pruned = true;
+        break;
+      }
+    }
+    if (pruned) continue;
+    size_t retained = 0;
+    for (size_t position = 0; position < selected_indices.size();) {
+      const size_t selected_index = selected_indices[position];
+      if (source_distance < source_distance_of(
+            sorted_candidates[selected_index]) &&
+          pair_prunes(sorted_candidates[selected_index], candidate,
+                      source_distance_of(sorted_candidates[selected_index]))) {
+        selected.erase(selected.begin() + position);
+        selected_indices.erase(selected_indices.begin() + position);
+      } else {
+        selected_indices[retained] = selected_index;
+        selected[retained] = selected[position];
+        ++retained;
+        ++position;
+      }
+    }
+    selected.resize(retained);
+    selected_indices.resize(retained);
+    if (selected.size() == result_limit) {
+      selected.pop_back();
+      selected_indices.pop_back();
+    }
+    selected.push_back(pointer_of(candidate));
+    selected_indices.push_back(index);
   }
 }
 

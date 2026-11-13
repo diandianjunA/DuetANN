@@ -1,1 +1,0 @@
-../../common/plot_program3.py

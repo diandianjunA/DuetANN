@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <array>
+#include <cstdlib>
 #include <cfloat>
 #include <chrono>
 #include <cmath>
@@ -42,6 +43,7 @@
 #include "memory_node/storage_owner_maintenance/certificate_lease.hh"
 #include "memory_node/storage_owner_maintenance/dependency_scheduler.hh"
 #include "memory_node/storage_owner_maintenance/home_rpc_outbox.hh"
+#include "memory_node/storage_owner_maintenance/ordered_commit_policy.hh"
 #include "memory_node/storage_owner_maintenance/ready_context_queue.hh"
 #include "memory_node/storage_owner_maintenance/reverse_outbox.hh"
 #include "memory_node/storage_owner_maintenance/stage2_batch_policy.hh"
@@ -50,9 +52,11 @@
 #include "service/index_metadata.hh"
 #include "service/storage_owner_protocol.hh"
 #include "vamana/centroid_router.hh"
+#include "vamana/graph_extent_cache.hh"
 #include "vamana/vamana_node.hh"
 
 namespace memory_node_storage_owner_maintenance_detail {
+class Stage2Worker;
 enum class Stage2SearchAdvanceResult : std::uint8_t;
 struct Stage2SearchIoState;
 }  // namespace memory_node_storage_owner_maintenance_detail
@@ -183,6 +187,8 @@ class MemoryNode {
     vec<memory_node_detail::BeamEntry> beam;
     vec<RemotePtr> remote_frontier;
     vec<RemotePtr> backlink_targets;
+    memory_node_storage_owner_maintenance_detail::GlobalCommitTicket ordered_ticket;
+    memory_node_storage_owner_maintenance_detail::SearchDependencySet search_dependencies;
     u64 execute_initial_placement_version{};
     u64 initial_placement_version{};
     bool prepared{};
@@ -263,12 +269,16 @@ class MemoryNode {
     // failures. Every retry revalidates it before any temporary bridge removal.
     bool stage2_promotion_committed{};
     RemotePtr stage2_promotion_parent;
+    vec<RemotePtr> stage2_replaced_certificate_parents;
     bool certificate_released{};
-    // Exact fixed-width Stage1 beam and every unique cross-partition pointer
-    // observed while expanding it. Stage2 resumes from these structures and
-    // never restarts a search from another shard's representative.
+    // Fixed-width local beam and complete cross-partition frontier used to
+    // initialize one owner-driven continuation. Decoupled Stage2 refreshes
+    // both from the current stable graph before the first remote read; remote
+    // owners still execute only selected expand/score work, never nested search.
     vec<memory_node_detail::BeamEntry> stage1_beam;
     vec<RemotePtr> stage1_remote_frontier;
+    memory_node_storage_owner_maintenance_detail::GlobalCommitTicket ordered_ticket;
+    memory_node_storage_owner_maintenance_detail::SearchDependencySet search_dependencies;
     // Targets that actually acknowledged a provisional backlink. Stage2 must
     // remove or replace exactly this set; attempted-but-full targets are not
     // part of the handoff transaction.
@@ -278,6 +288,8 @@ class MemoryNode {
     // added while stage2 was queued/in flight are rebased instead of lost.
     vec<RemotePtr> stage1_base_neighbors;
     vec<RemotePtr> stage2_neighbors;
+    vec<RemotePtr> stage2_rebase_additions;
+    bool stage2_rebase_replayed{};
     // Protected children captured at the same locked boundary that freezes
     // the source graph. They are preserved at an in-place destination and
     // transferred verbatim to a migrated destination before it is published.
@@ -298,12 +310,14 @@ class MemoryNode {
     bool cleanup_protected_reparented{};
     vec<RemotePtr> cleanup_protected_children;
     vec<RemotePtr> cleanup_replacement_parents;
+    vec<RemotePtr> cleanup_replaced_certificate_parents;
     vec<RemotePtr> cleanup_neighbors;
     std::chrono::steady_clock::time_point queued_at{};
     std::chrono::steady_clock::time_point retry_not_before{};
     // Zero until the first permanent-failure deferral of this descriptor; the
     // Stage2 retry window is measured from that point.
     std::chrono::steady_clock::time_point stage2_first_permanent_defer_at{};
+    std::chrono::steady_clock::time_point refinement_first_retry_at{};
   };
 
   struct StorageOwnerMaintenanceIntent {
@@ -319,8 +333,17 @@ class MemoryNode {
 
 public:
   explicit MemoryNode(Configuration& config);
+  void request_shutdown();
+  static bool mutation_completion_trace_enabled() {
+    return service::storage_owner::mutation_completion_trace_enabled();
+  }
+  static void enable_mutation_completion_trace(int signal) {
+    service::storage_owner::enable_mutation_completion_trace(signal);
+  }
 
 private:
+  friend class memory_node_storage_owner_maintenance_detail::Stage2Worker;
+
   using InsertBreakdownCounters = service::storage_owner::InsertBreakdownCounters;
   using BeamEntry = memory_node_detail::BeamEntry;
   using NodeSnapshot = memory_node_detail::NodeSnapshot;
@@ -506,7 +529,10 @@ private:
   void retire_storage_owner_search_lane_grants(u32 worker_id);
   void release_storage_owner_search_lane_lease();
   void allocate_memory();
-  void wait_for_start_signal(const Configuration& config);
+  storage_startup::Response receive_storage_start_signal(
+      const Configuration& config);
+  void publish_storage_start_response(
+      const storage_startup::Response& response);
   std::pair<bool, str> load_index_file(const str& path);
 
   // Peer RDMA transport
@@ -785,7 +811,11 @@ private:
   bool activate_cleanup_fanout_and_wait(
       span<const service::storage_owner::CleanupActivateItem> items,
       vec<service::storage_owner::CleanupActivateResult>& results,
-      const Configuration& config);
+      const Configuration& config,
+      const std::function<void(
+        span<const service::storage_owner::CleanupActivateItem>,
+        span<const service::storage_owner::CleanupActivateResult>)>&
+        on_resolved = {});
   bool relocate_via_authority(
       u32 authority_shard,
       const service::storage_owner::AuthorityPlacementItem& item,
@@ -800,6 +830,11 @@ private:
       u32 physical_shard,
       const service::storage_owner::DynamicNodeControlItem& item,
       service::storage_owner::DynamicNodeControlResult& result,
+      const Configuration& config);
+  bool control_dynamic_nodes_on_shards(
+      span<const u32> physical_shards,
+      span<const service::storage_owner::DynamicNodeControlItem> items,
+      vec<service::storage_owner::DynamicNodeControlResult>& results,
       const Configuration& config);
   bool post_peer_control_request_attempt(
       u32 target_shard,
@@ -885,7 +920,9 @@ private:
   size_t insert_request_slot_offset(u32 client_id, u32 slot_id) const;
   size_t insert_response_slot_offset(const Configuration& config, u32 client_id, u32 slot_id) const;
   size_t insert_completion_slot_offset(u32 client_id, u32 slot_id) const;
-  void service_storage_runtime(const Configuration& config);
+  void service_storage_runtime(
+      const Configuration& config,
+      const storage_startup::Response& startup_response);
   size_t response_slot_bytes(const Configuration& config) const;
   size_t handle_storage_insert_request(u32 client_id,
                                        u32 slot_id,
@@ -1043,6 +1080,7 @@ private:
     const vec<RemotePtr>& provisional,
     std::optional<u32> generation_override = std::nullopt,
     std::optional<bool> deleted_override = std::nullopt);
+  void dump_final_graph_for_audit();
   void write_neighbor_list(RemotePtr rptr, const vec<RemotePtr>& neighbors);
   void write_dynamic_navigation_code(RemotePtr rptr,
                                      const span<const element_t> components);
@@ -1072,7 +1110,10 @@ private:
       const byte_t* integral_raw_query = nullptr,
       vec<BeamEntry>* stage1_beam = nullptr,
       vec<RemotePtr>* remote_frontier = nullptr,
-      bool record_pipeline_telemetry = true);
+      bool record_pipeline_telemetry = true,
+      memory_node_storage_owner_maintenance_detail::SearchDependencySet*
+        search_dependencies = nullptr,
+      bool include_provisional = false);
   // The returned worker-local buffer is valid until the next Stage2 search
   // on the same OS thread. Callers must consume it synchronously.
   const vec<RemotePtr>& continue_stage2_search_candidates(
@@ -1113,14 +1154,18 @@ private:
       span<const NodeSnapshot> candidates,
       const hashset_t<RemotePtr>& skip,
       const Configuration& config,
-      u32 result_limit_override = 0);
+      u32 result_limit_override = 0,
+      bool include_provisional = false,
+      size_t existing_count = 0);
   vec<RemotePtr> robust_prune_snapshot_refs_cpu(
       const byte_t* source,
       VectorDType source_dtype,
       span<const NodeSnapshot* const> candidates,
       const hashset_t<RemotePtr>& skip,
       const Configuration& config,
-      u32 result_limit_override = 0);
+      u32 result_limit_override = 0,
+      bool include_provisional = false,
+      size_t existing_count = 0);
   bool apply_local_reverse_update(RemotePtr target_ptr,
                                   const vec<RemotePtr>& candidate_ptrs,
                                   const Configuration& config,
@@ -1196,9 +1241,8 @@ private:
   // makes that state capacity-bounded under adversarial update streams.
   const u32 vector_id_namespace_size_;
   const u32 storage_owner_peer_rdma_tokens_;
-  // Fixed and adaptive graph access share the same dynamic record layout.
-  // Fixed mode publishes UNKNOWN in the existing advisory tag byte.
-  const bool dynamic_graph_extent_publication_enabled_;
+  const bool graph_extent_enabled_;
+  vamana::graph_extent::Cache graph_extent_cache_;
 
   HugePage<byte_t> index_buffer_;
   MemoryRegion index_region_;
@@ -1378,6 +1422,17 @@ private:
   size_t dynamic_allocation_dedupe_limit_{1024};
   vec<std::thread> storage_owner_maintenance_workers_;
   vec<u_ptr<StorageOwnerThread>> storage_owner_maintenance_worker_states_;
+  std::mutex storage_owner_deferred_refinements_mutex_;
+  std::deque<StorageOwnerMaintenanceTask> storage_owner_deferred_refinements_;
+  std::chrono::steady_clock::time_point storage_owner_deferred_refinement_started_{};
+  std::array<std::atomic<u8>, CPU_SETSIZE>
+    storage_owner_refinement_backpressure_{};
+  std::mutex debug_node_lock_owners_mutex_;
+  std::unordered_map<u64, std::thread::id> debug_node_lock_owners_;
+  std::mutex debug_cleanup_active_requests_mutex_;
+  std::unordered_map<std::thread::id,
+    std::pair<u64, std::chrono::steady_clock::time_point>>
+    debug_cleanup_active_requests_;
   std::mutex storage_owner_maintenance_mutex_;
   std::condition_variable storage_owner_maintenance_cv_;
   // Peer CQ progress intentionally outlives the maintenance runtime during
@@ -1506,6 +1561,12 @@ private:
   std::atomic<u64> storage_owner_stage2_home_score_rpc_request_bytes_{0};
   std::atomic<u64> storage_owner_stage2_home_score_rpc_response_bytes_{0};
   std::atomic<u64> storage_owner_stage2_home_scored_neighbors_{0};
+  std::atomic<u64> storage_owner_stage2_score_home_wait_ns_{0};
+  std::atomic<u64> storage_owner_stage2_graph_home_wait_ns_{0};
+  std::atomic<u64> storage_owner_stage2_score_home_dispatches_{0};
+  std::atomic<u64> storage_owner_stage2_graph_home_dispatches_{0};
+  std::atomic<u64> storage_owner_stage2_dual_plane_dispatches_{0};
+  std::atomic<u64> storage_owner_stage2_dual_plane_waits_{0};
   std::atomic<u64> storage_owner_stage2_migrations_{0};
   std::atomic<u64> storage_owner_stage2_final_edges_{0};
   std::atomic<u64> storage_owner_stage2_cross_edges_stage1_home_{0};
@@ -1624,7 +1685,6 @@ private:
   dense_hashmap_t<node_t, RemotePtr> base_idmap_;
   std::array<DynamicFreshnessShard, kDynamicFreshnessShardCount>
     dynamic_freshness_shards_;
-
   inline static thread_local StorageOwnerThread* current_storage_owner_thread_{nullptr};
   inline static thread_local bool current_storage_owner_maintenance_worker_{false};
   inline static thread_local StorageOwnerMaintenanceWaiterRegistrations*

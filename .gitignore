@@ -12,6 +12,9 @@ compile_commands.json
 *~
 .DS_Store
 CMakeUserPresets.json
+doc/
+experiment/
+results/
 
 # Local experiment output. Existing checked-in reference results stay tracked.
 /experiment/**/results/

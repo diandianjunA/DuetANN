@@ -102,9 +102,8 @@ struct CompletionDescriptor {
   // reads and therefore cannot be reconstructed from the physical record
   // size when variable-length reads are enabled.
   u64 graph_read_bytes{};
-  // Physical graph bytes fetched for dynamic handles only. This is kept
-  // separate from graph_read_bytes so DynaExtent savings are not hidden by
-  // the much larger immutable base-node population.
+  // Physical graph bytes fetched for dynamic handles only. Keeping this
+  // separate exposes quantized-extent savings hidden by the base population.
   u64 dynamic_graph_read_bytes{};
   // Adaptive Speculative Frontier Execution (ASFE) keeps communication issue
   // width independent from authoritative graph-expansion commit width. These
@@ -212,7 +211,9 @@ struct CompletionDescriptor {
   u32 graph_extent_fallback_reads{};
   u32 graph_extent_underhint_reads{};
   u32 graph_extent_hint_promotions{};
-  // DynaExtent raw physical snapshot-attempt and repair counters. A fallback
+  u32 graph_full_record_avoidance_hits{};
+  u32 graph_full_record_avoidance_misses{};
+  // Dynamic-node quantized-extent physical attempts and repairs. A fallback
   // contributes one short attempt plus one full attempt, but checksum retries
   // add further physical attempts, so logical graph reads cannot be inferred
   // from these fields. The host widens the query-local counters unchanged.
@@ -260,7 +261,7 @@ struct CompletionDescriptor {
 // CompletionDescriptor is embedded once in persistent-kernel shared memory
 // and is also the mapped device-to-host ring ABI. Keep the explicit size check
 // synchronized with both sides whenever production telemetry extends it.
-static_assert(sizeof(CompletionDescriptor) == 728);
+static_assert(sizeof(CompletionDescriptor) == 736);
 static_assert(alignof(CompletionDescriptor) == alignof(u64));
 
 struct CentroidRoutePublishDescriptor {
@@ -320,6 +321,8 @@ struct TelemetrySnapshot {
   u64 graph_extent_fallback_reads{};
   u64 graph_extent_underhint_reads{};
   u64 graph_extent_hint_promotions{};
+  u64 graph_full_record_avoidance_hits{};
+  u64 graph_full_record_avoidance_misses{};
   u64 expanded_parent_count{};
   u64 expanded_neighbor_count_sum{};
   std::array<u64, kGraphDegreeHistogramBuckets>
@@ -430,6 +433,18 @@ struct TelemetrySnapshot {
   u64 gpu_total_persistent_blocks{};
 };
 
+class TelemetryCounter : public std::atomic<u64> {
+public:
+  TelemetryCounter(u64 value = 0) noexcept : std::atomic<u64>(value) {}
+
+  u64 fetch_add_single_writer(
+      u64 delta, std::memory_order order = std::memory_order_seq_cst) noexcept {
+    const u64 previous = load(order);
+    store(previous + delta, order);
+    return previous;
+  }
+};
+
 class Telemetry {
 public:
   TelemetrySnapshot snapshot() const;
@@ -444,154 +459,156 @@ public:
       u64 owner_blocks,
       u64 total_persistent_blocks);
 
-  std::atomic<u64> gpu_memory_explicit_bytes{0};
-  std::atomic<u64> gpu_memory_base_pq_bytes{0};
-  std::atomic<u64> gpu_memory_route_graph_bytes{0};
-  std::atomic<u64> queries_submitted{0};
-  std::atomic<u64> queries_completed{0};
-  std::atomic<u64> batches{0};
-  std::atomic<u64> batch_queries{0};
-  std::atomic<u64> submission_wait_ns{0};
-  std::atomic<u64> completion_wait_ns{0};
-  std::atomic<u64> gpu_active_ns{0};
-  std::atomic<u64> gpu_prepare_ns{0};
-  std::atomic<u64> gpu_graph_ns{0};
-  std::atomic<u64> gpu_score_ns{0};
-  std::atomic<u64> gpu_beam_ns{0};
-  std::atomic<u64> gpu_exact_ns{0};
-  std::atomic<u64> gpu_beam_selection_ns{0};
-  std::atomic<u64> gpu_rdma_issue_ns{0};
-  std::atomic<u64> gpu_frontier_preview_ns{0};
-  std::atomic<u64> gpu_frontier_prepare_ns{0};
-  std::atomic<u64> gpu_frontier_enqueue_ns{0};
-  std::atomic<u64> gpu_frontier_prefix_to_beam_publish_ns{0};
-  std::atomic<u64> gpu_frontier_issue_to_beam_publish_ns{0};
-  std::atomic<u64> gpu_rdma_wait_ns{0};
-  std::atomic<u64> gpu_graph_validation_ns{0};
-  std::atomic<u64> gpu_neighbor_decode_ns{0};
-  std::atomic<u64> gpu_pq_score_ns{0};
-  std::atomic<u64> gpu_visited_ns{0};
-  std::atomic<u64> gpu_beam_merge_ns{0};
-  std::atomic<u64> gpu_beam_merge_prepare_ns{0};
-  std::atomic<u64> gpu_beam_merge_sort_ns{0};
-  std::atomic<u64> gpu_beam_merge_materialize_ns{0};
-  std::atomic<u64> rdma_read_ops{0};
-  std::atomic<u64> rdma_read_bytes{0};
-  std::atomic<u64> rdma_merged_requests{0};
-  std::atomic<u64> direct_path_failures{0};
-  std::atomic<u64> graph_page_requests{0};
-  std::atomic<u64> graph_shard_batches{0};
-  std::atomic<u64> graph_read_retries{0};
-  std::atomic<u64> graph_read_bytes{0};
-  std::atomic<u64> graph_live_extent_reads{0};
-  std::atomic<u64> graph_full_record_reads{0};
-  std::atomic<u64> graph_extent_fallback_reads{0};
-  std::atomic<u64> graph_extent_underhint_reads{0};
-  std::atomic<u64> graph_extent_hint_promotions{0};
-  std::atomic<u64> expanded_parent_count{0};
-  std::atomic<u64> expanded_neighbor_count_sum{0};
-  std::array<std::atomic<u64>, kGraphDegreeHistogramBuckets>
+  TelemetryCounter gpu_memory_explicit_bytes{0};
+  TelemetryCounter gpu_memory_base_pq_bytes{0};
+  TelemetryCounter gpu_memory_route_graph_bytes{0};
+  TelemetryCounter queries_submitted{0};
+  TelemetryCounter queries_completed{0};
+  TelemetryCounter batches{0};
+  TelemetryCounter batch_queries{0};
+  TelemetryCounter submission_wait_ns{0};
+  TelemetryCounter completion_wait_ns{0};
+  TelemetryCounter gpu_active_ns{0};
+  TelemetryCounter gpu_prepare_ns{0};
+  TelemetryCounter gpu_graph_ns{0};
+  TelemetryCounter gpu_score_ns{0};
+  TelemetryCounter gpu_beam_ns{0};
+  TelemetryCounter gpu_exact_ns{0};
+  TelemetryCounter gpu_beam_selection_ns{0};
+  TelemetryCounter gpu_rdma_issue_ns{0};
+  TelemetryCounter gpu_frontier_preview_ns{0};
+  TelemetryCounter gpu_frontier_prepare_ns{0};
+  TelemetryCounter gpu_frontier_enqueue_ns{0};
+  TelemetryCounter gpu_frontier_prefix_to_beam_publish_ns{0};
+  TelemetryCounter gpu_frontier_issue_to_beam_publish_ns{0};
+  TelemetryCounter gpu_rdma_wait_ns{0};
+  TelemetryCounter gpu_graph_validation_ns{0};
+  TelemetryCounter gpu_neighbor_decode_ns{0};
+  TelemetryCounter gpu_pq_score_ns{0};
+  TelemetryCounter gpu_visited_ns{0};
+  TelemetryCounter gpu_beam_merge_ns{0};
+  TelemetryCounter gpu_beam_merge_prepare_ns{0};
+  TelemetryCounter gpu_beam_merge_sort_ns{0};
+  TelemetryCounter gpu_beam_merge_materialize_ns{0};
+  TelemetryCounter rdma_read_ops{0};
+  TelemetryCounter rdma_read_bytes{0};
+  TelemetryCounter rdma_merged_requests{0};
+  TelemetryCounter direct_path_failures{0};
+  TelemetryCounter graph_page_requests{0};
+  TelemetryCounter graph_shard_batches{0};
+  TelemetryCounter graph_read_retries{0};
+  TelemetryCounter graph_read_bytes{0};
+  TelemetryCounter graph_live_extent_reads{0};
+  TelemetryCounter graph_full_record_reads{0};
+  TelemetryCounter graph_extent_fallback_reads{0};
+  TelemetryCounter graph_extent_underhint_reads{0};
+  TelemetryCounter graph_extent_hint_promotions{0};
+  TelemetryCounter graph_full_record_avoidance_hits{0};
+  TelemetryCounter graph_full_record_avoidance_misses{0};
+  TelemetryCounter expanded_parent_count{0};
+  TelemetryCounter expanded_neighbor_count_sum{0};
+  std::array<TelemetryCounter, kGraphDegreeHistogramBuckets>
     expanded_degree_histogram{};
-  std::atomic<u64> dynamic_expanded_parent_count{0};
-  std::atomic<u64> dynamic_expanded_neighbor_count_sum{0};
-  std::array<std::atomic<u64>, kGraphDegreeHistogramBuckets>
+  TelemetryCounter dynamic_expanded_parent_count{0};
+  TelemetryCounter dynamic_expanded_neighbor_count_sum{0};
+  std::array<TelemetryCounter, kGraphDegreeHistogramBuckets>
     dynamic_expanded_degree_histogram{};
-  std::atomic<u64> dynamic_graph_short_reads{0};
-  std::atomic<u64> dynamic_graph_full_reads{0};
-  std::atomic<u64> dynamic_graph_read_bytes{0};
-  std::atomic<u64> dynamic_graph_fallback_reads{0};
-  std::atomic<u64> dynamic_graph_hint_promotions{0};
-  std::atomic<u64> dynamic_graph_hint_demotions{0};
-  std::atomic<u64> logical_expansions{0};
-  std::atomic<u64> critical_graph_reads{0};
-  std::atomic<u64> critical_graph_bytes{0};
-  std::atomic<u64> speculative_graph_reads{0};
-  std::atomic<u64> speculative_graph_bytes{0};
-  std::atomic<u64> speculative_wasted_bytes{0};
-  std::atomic<u64> terminal_exact_cache_wasted_bytes{0};
-  std::atomic<u64> rdma_completion_latency_ns{0};
-  std::atomic<u64> speculative_completion_latency_ns{0};
-  std::atomic<u64> rdma_completion_groups{0};
-  std::atomic<u64> speculative_completion_groups{0};
-  std::atomic<u64> speculative_arrived{0};
-  std::atomic<u64> speculative_promoted{0};
-  std::atomic<u64> speculative_stale{0};
-  std::atomic<u64> speculative_queue_rejects{0};
-  std::atomic<u64> issue_epochs{0};
-  std::atomic<u64> commit_epochs{0};
-  std::atomic<u64> issue_width_sum{0};
-  std::atomic<u64> issue_width_capacity_sum{0};
-  std::atomic<u64> commit_width_sum{0};
-  std::atomic<u64> core_prefetch_bytes{0};
-  std::atomic<u64> max_issue_width{0};
-  std::atomic<u64> max_commit_width{0};
-  std::atomic<u64> critical_rob_hits{0};
-  std::atomic<u64> critical_misses{0};
-  std::atomic<u64> speculative_wait_ns{0};
-  std::atomic<u64> core_prefetch_reads{0};
-  std::atomic<u64> core_prefetch_arrived{0};
-  std::atomic<u64> core_prefetch_promoted{0};
-  std::atomic<u64> core_prefetch_stale{0};
-  std::atomic<u64> core_prefetch_queue_rejects{0};
-  std::atomic<u64> core_prefetch_waves{0};
-  std::atomic<u64> core_ready_waves{0};
-  std::atomic<u64> terminal_exact_cache_attempted_queries{0};
-  std::atomic<u64> terminal_exact_cache_issued_records{0};
-  std::atomic<u64> terminal_exact_cache_promoted_records{0};
-  std::atomic<u64> terminal_exact_cache_queue_rejects{0};
-  std::atomic<u64> terminal_exact_cache_miss_records{0};
-  std::atomic<u64> completion_score_batches{0};
-  std::atomic<u64> completion_score_candidates{0};
-  std::atomic<u64> frontier_reusable_certificates{0};
-  std::atomic<u64> frontier_streamed_candidate_runs{0};
-  std::atomic<u64> ordered_score_batches{0};
-  std::atomic<u64> ordered_score_candidates{0};
-  std::atomic<u64> ooo_bypassed_parents{0};
-  std::atomic<u64> frontier_reusable_prefix_ranks{0};
-  std::atomic<u64> frontier_reusable_full_prefix_certificates{0};
-  std::atomic<u64> frontier_reusable_issued_certificates{0};
-  std::atomic<u64> frontier_certificate_rejects{0};
-  std::atomic<u64> graph_dependency_rounds{0};
-  std::atomic<u64> graph_route_hits{0};
-  std::atomic<u64> graph_route_refreshes{0};
-  std::atomic<u64> centroid_route_publications{0};
-  std::atomic<u64> centroid_route_shard_updates{0};
-  std::atomic<u64> centroid_route_live_entries{0};
-  std::atomic<u64> centroid_route_snapshot_skips{0};
-  std::atomic<u64> centroid_route_probe_reads{0};
-  std::atomic<u64> centroid_route_body_reads{0};
-  std::atomic<u64> centroid_route_unchanged_polls{0};
-  std::atomic<u64> centroid_route_poll_delay_us{0};
-  std::atomic<u64> centroid_route_query_retries{0};
-  std::atomic<u64> centroid_route_query_timeouts{0};
-  std::atomic<u64> exact_vector_reads{0};
-  std::atomic<u64> exact_snapshot_train_batches{0};
-  std::atomic<u64> exact_snapshot_train_fallbacks{0};
-  std::atomic<u64> dynamic_code_candidates{0};
-  std::atomic<u64> dynamic_code_reads{0};
-  std::atomic<u64> dynamic_code_read_bytes{0};
-  std::atomic<u64> dynamic_code_incarnation_rejects{0};
-  std::atomic<u64> dynamic_code_wait_ns{0};
-  std::atomic<u64> dynamic_code_cache_hits{0};
-  std::atomic<u64> dynamic_code_batch_deduplicated{0};
-  std::atomic<u64> dynamic_code_cache_publish_successes{0};
-  std::atomic<u64> dynamic_code_cache_publish_races{0};
-  std::atomic<u64> dynamic_code_cache_lookup_probe_exhaustions{0};
-  std::atomic<u64> dynamic_code_cache_publish_probe_exhaustions{0};
-  std::atomic<u64> dynamic_code_cache_lookup_probes{0};
-  std::atomic<u64> dynamic_code_cache_max_lookup_probes{0};
+  TelemetryCounter dynamic_graph_short_reads{0};
+  TelemetryCounter dynamic_graph_full_reads{0};
+  TelemetryCounter dynamic_graph_read_bytes{0};
+  TelemetryCounter dynamic_graph_fallback_reads{0};
+  TelemetryCounter dynamic_graph_hint_promotions{0};
+  TelemetryCounter dynamic_graph_hint_demotions{0};
+  TelemetryCounter logical_expansions{0};
+  TelemetryCounter critical_graph_reads{0};
+  TelemetryCounter critical_graph_bytes{0};
+  TelemetryCounter speculative_graph_reads{0};
+  TelemetryCounter speculative_graph_bytes{0};
+  TelemetryCounter speculative_wasted_bytes{0};
+  TelemetryCounter terminal_exact_cache_wasted_bytes{0};
+  TelemetryCounter rdma_completion_latency_ns{0};
+  TelemetryCounter speculative_completion_latency_ns{0};
+  TelemetryCounter rdma_completion_groups{0};
+  TelemetryCounter speculative_completion_groups{0};
+  TelemetryCounter speculative_arrived{0};
+  TelemetryCounter speculative_promoted{0};
+  TelemetryCounter speculative_stale{0};
+  TelemetryCounter speculative_queue_rejects{0};
+  TelemetryCounter issue_epochs{0};
+  TelemetryCounter commit_epochs{0};
+  TelemetryCounter issue_width_sum{0};
+  TelemetryCounter issue_width_capacity_sum{0};
+  TelemetryCounter commit_width_sum{0};
+  TelemetryCounter core_prefetch_bytes{0};
+  TelemetryCounter max_issue_width{0};
+  TelemetryCounter max_commit_width{0};
+  TelemetryCounter critical_rob_hits{0};
+  TelemetryCounter critical_misses{0};
+  TelemetryCounter speculative_wait_ns{0};
+  TelemetryCounter core_prefetch_reads{0};
+  TelemetryCounter core_prefetch_arrived{0};
+  TelemetryCounter core_prefetch_promoted{0};
+  TelemetryCounter core_prefetch_stale{0};
+  TelemetryCounter core_prefetch_queue_rejects{0};
+  TelemetryCounter core_prefetch_waves{0};
+  TelemetryCounter core_ready_waves{0};
+  TelemetryCounter terminal_exact_cache_attempted_queries{0};
+  TelemetryCounter terminal_exact_cache_issued_records{0};
+  TelemetryCounter terminal_exact_cache_promoted_records{0};
+  TelemetryCounter terminal_exact_cache_queue_rejects{0};
+  TelemetryCounter terminal_exact_cache_miss_records{0};
+  TelemetryCounter completion_score_batches{0};
+  TelemetryCounter completion_score_candidates{0};
+  TelemetryCounter frontier_reusable_certificates{0};
+  TelemetryCounter frontier_streamed_candidate_runs{0};
+  TelemetryCounter ordered_score_batches{0};
+  TelemetryCounter ordered_score_candidates{0};
+  TelemetryCounter ooo_bypassed_parents{0};
+  TelemetryCounter frontier_reusable_prefix_ranks{0};
+  TelemetryCounter frontier_reusable_full_prefix_certificates{0};
+  TelemetryCounter frontier_reusable_issued_certificates{0};
+  TelemetryCounter frontier_certificate_rejects{0};
+  TelemetryCounter graph_dependency_rounds{0};
+  TelemetryCounter graph_route_hits{0};
+  TelemetryCounter graph_route_refreshes{0};
+  TelemetryCounter centroid_route_publications{0};
+  TelemetryCounter centroid_route_shard_updates{0};
+  TelemetryCounter centroid_route_live_entries{0};
+  TelemetryCounter centroid_route_snapshot_skips{0};
+  TelemetryCounter centroid_route_probe_reads{0};
+  TelemetryCounter centroid_route_body_reads{0};
+  TelemetryCounter centroid_route_unchanged_polls{0};
+  TelemetryCounter centroid_route_poll_delay_us{0};
+  TelemetryCounter centroid_route_query_retries{0};
+  TelemetryCounter centroid_route_query_timeouts{0};
+  TelemetryCounter exact_vector_reads{0};
+  TelemetryCounter exact_snapshot_train_batches{0};
+  TelemetryCounter exact_snapshot_train_fallbacks{0};
+  TelemetryCounter dynamic_code_candidates{0};
+  TelemetryCounter dynamic_code_reads{0};
+  TelemetryCounter dynamic_code_read_bytes{0};
+  TelemetryCounter dynamic_code_incarnation_rejects{0};
+  TelemetryCounter dynamic_code_wait_ns{0};
+  TelemetryCounter dynamic_code_cache_hits{0};
+  TelemetryCounter dynamic_code_batch_deduplicated{0};
+  TelemetryCounter dynamic_code_cache_publish_successes{0};
+  TelemetryCounter dynamic_code_cache_publish_races{0};
+  TelemetryCounter dynamic_code_cache_lookup_probe_exhaustions{0};
+  TelemetryCounter dynamic_code_cache_publish_probe_exhaustions{0};
+  TelemetryCounter dynamic_code_cache_lookup_probes{0};
+  TelemetryCounter dynamic_code_cache_max_lookup_probes{0};
   // Occupancy is lifetime state, not an interval counter. reset() deliberately
   // preserves it so a post-warmup benchmark reports the cache it actually uses.
-  std::atomic<u64> dynamic_code_cache_occupied{0};
-  std::atomic<u64> dynamic_code_cache_capacity{0};
-  std::atomic<u64> gpu_kernel_threads{0};
-  std::atomic<u64> gpu_registers_per_thread{0};
-  std::atomic<u64> gpu_static_shared_bytes{0};
-  std::atomic<u64> gpu_active_blocks_per_sm{0};
-  std::atomic<u64> gpu_effective_blocks_per_sm{0};
-  std::atomic<u64> gpu_query_blocks{0};
-  std::atomic<u64> gpu_owner_blocks{0};
-  std::atomic<u64> gpu_total_persistent_blocks{0};
+  TelemetryCounter dynamic_code_cache_occupied{0};
+  TelemetryCounter dynamic_code_cache_capacity{0};
+  TelemetryCounter gpu_kernel_threads{0};
+  TelemetryCounter gpu_registers_per_thread{0};
+  TelemetryCounter gpu_static_shared_bytes{0};
+  TelemetryCounter gpu_active_blocks_per_sm{0};
+  TelemetryCounter gpu_effective_blocks_per_sm{0};
+  TelemetryCounter gpu_query_blocks{0};
+  TelemetryCounter gpu_owner_blocks{0};
+  TelemetryCounter gpu_total_persistent_blocks{0};
 };
 
 }  // namespace gpu_search

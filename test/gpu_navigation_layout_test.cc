@@ -54,6 +54,9 @@ void test_dynamic_pq_arena_mapping_and_incarnation_order() {
     tag, gpu_search::make_dynamic_code_tag(incarnation + 1, 1), incarnation));
   assert(gpu_search::dynamic_code_tag_extent_class(0xff000000u | incarnation) ==
          gpu_search::kPersistentDynamicCodeArenaUnknownExtent);
+  assert(gpu_search::dynamic_code_arena_bootstrap_extent(tag, 1) == 7);
+  assert(gpu_search::dynamic_code_arena_bootstrap_extent(tag, 0) ==
+         gpu_search::kPersistentDynamicCodeArenaUnknownExtent);
 
   assert(gpu_search::dynamic_code_arena_can_publish(0, 1));
   assert(gpu_search::dynamic_code_arena_can_publish(
@@ -104,14 +107,18 @@ void test_dynamic_pq_arena_mapping_and_incarnation_order() {
   assert(refined == busy_unknown);
 
   u32 demoted = 0;
-  assert(gpu_search::dynamic_code_arena_guarded_demoted_extent_state(
+  auto adaptation = gpu_search::dynamic_code_arena_adapted_extent_state(
     promoted = gpu_search::make_dynamic_code_tag(incarnation, 11), incarnation,
-    7, demoted));
+    7, demoted);
+  assert(adaptation.adaptation ==
+         vamana::graph_extent::Adaptation::demoted);
   assert(gpu_search::dynamic_code_tag_extent_class(demoted) == 8);
-  assert(!gpu_search::dynamic_code_arena_guarded_demoted_extent_state(
-    demoted, incarnation, 7, demoted));
-  assert(!gpu_search::dynamic_code_arena_guarded_demoted_extent_state(
-    recycled, incarnation, 0, demoted));
+  adaptation = gpu_search::dynamic_code_arena_adapted_extent_state(
+    demoted, incarnation, 7, demoted);
+  assert(adaptation.adaptation == vamana::graph_extent::Adaptation::none);
+  adaptation = gpu_search::dynamic_code_arena_adapted_extent_state(
+    recycled, incarnation, 0, demoted);
+  assert(adaptation.adaptation == vamana::graph_extent::Adaptation::none);
   assert(demoted == recycled);
 }
 
@@ -409,7 +416,22 @@ void test_graph_live_extent_reconstructs_canonical_record() {
   constexpr u32 graph_degree = 96;
   constexpr u32 graph_capacity = 102;
   constexpr u32 record_bytes = 16 + graph_capacity * sizeof(u64);
+  constexpr u32 quantum = validation::kGraphExtentEdgesPerClass;
+  constexpr auto class_for = [](u32 edges) {
+    return (edges + quantum - 1) / quantum;
+  };
   static_assert(record_bytes == 832);
+  assert(validation::is_full_record_avoidance_hit(
+    true, true, validation::SnapshotState::valid));
+  assert(!validation::is_full_record_avoidance_hit(
+    false, true, validation::SnapshotState::valid));
+  assert(!validation::is_full_record_avoidance_hit(
+    true, false, validation::SnapshotState::valid));
+  assert(!validation::is_full_record_avoidance_hit(
+    true, true, validation::SnapshotState::stale_incarnation));
+  assert(validation::full_record_avoidance_misses(100, 97) == 3);
+  assert(validation::full_record_avoidance_misses(100, 100) == 0);
+  assert(validation::full_record_avoidance_misses(100, 101) == 0);
 
   for (const u32 exponent : {0u, 1u, 2u, 7u, 64u, 368u, 816u}) {
     u32 repeated = 1;
@@ -422,20 +444,20 @@ void test_graph_live_extent_reconstructs_canonical_record() {
   assert(validation::graph_extent_bytes_for_class(0, record_bytes,
                                                   graph_capacity) == 16);
   assert(validation::graph_extent_bytes_for_class(1, record_bytes,
-                                                  graph_capacity) == 80);
-  assert(validation::graph_extent_bytes_for_class(7, record_bytes,
-                                                  graph_capacity) == 464);
+                                                  graph_capacity) == 16 + quantum * 8);
+  assert(validation::graph_extent_bytes_for_class(class_for(56), record_bytes,
+                                                  graph_capacity) == 16 + 56 * 8);
   assert(validation::graph_extent_bytes_for_class(
-           13, record_bytes, graph_capacity) == record_bytes);
+           class_for(graph_capacity), record_bytes, graph_capacity) == record_bytes);
   assert(validation::graph_extent_bytes_for_class(
            validation::kGraphExtentClassUnknown, record_bytes,
            graph_capacity) == record_bytes);
   assert(
     validation::graph_extent_class_for_required_bytes(16, graph_capacity) == 0);
   assert(validation::graph_extent_class_for_required_bytes(
-           16 + 8 * sizeof(u64), graph_capacity) == 1);
+           16 + 8 * sizeof(u64), graph_capacity) == class_for(8));
   assert(validation::graph_extent_class_for_required_bytes(
-           16 + 9 * sizeof(u64), graph_capacity) == 2);
+           16 + 9 * sizeof(u64), graph_capacity) == class_for(9));
   assert(validation::graph_extent_class_for_required_bytes(
            17, graph_capacity) == validation::kGraphExtentClassUnknown);
   assert(validation::graph_extent_class_for_required_bytes(
@@ -450,17 +472,35 @@ void test_graph_live_extent_reconstructs_canonical_record() {
          validation::kGraphExtentClassUnknown);
   assert(validation::packed_graph_extent_class(packed_classes, 3) == 9);
   u32 promoted_word = 0;
-  assert(validation::promoted_graph_extent_word(packed_classes, 1, 8,
-                                                promoted_word));
+  auto extent_transition = validation::adapted_graph_extent_word(
+    packed_classes, 1, 8, promoted_word);
+  assert(extent_transition.adaptation ==
+         vamana::graph_extent::Adaptation::promoted);
   assert(validation::packed_graph_extent_class(promoted_word, 0) == 3);
   assert(validation::packed_graph_extent_class(promoted_word, 1) == 8);
   assert(validation::packed_graph_extent_class(promoted_word, 2) ==
          validation::kGraphExtentClassUnknown);
   assert(validation::packed_graph_extent_class(promoted_word, 3) == 9);
-  assert(!validation::promoted_graph_extent_word(promoted_word, 1, 7,
-                                                 promoted_word));
-  assert(!validation::promoted_graph_extent_word(promoted_word, 2, 12,
-                                                 promoted_word));
+  extent_transition = validation::adapted_graph_extent_word(
+    promoted_word, 1, 7, promoted_word);
+  assert(extent_transition.adaptation ==
+         vamana::graph_extent::Adaptation::none);
+  u32 adapted_word = 0;
+  extent_transition = validation::adapted_graph_extent_word(
+    promoted_word, 1, 4, adapted_word);
+  assert(extent_transition.adaptation ==
+         vamana::graph_extent::Adaptation::demoted);
+  assert(validation::packed_graph_extent_class(adapted_word, 1) == 5);
+  assert(validation::packed_graph_extent_class(adapted_word, 0) == 3);
+  extent_transition = validation::adapted_graph_extent_word(
+    adapted_word, 1, 5, adapted_word);
+  assert(extent_transition.adaptation ==
+         vamana::graph_extent::Adaptation::none);
+  extent_transition = validation::adapted_graph_extent_word(
+    adapted_word, 2, 12, adapted_word);
+  assert(extent_transition.adaptation ==
+         vamana::graph_extent::Adaptation::refined_unknown);
+  assert(validation::packed_graph_extent_class(adapted_word, 2) == 12);
   // The optimistic hint is not charged against the legacy three full-record
   // snapshot attempts. Fixed/full: attempts 0,1 may retry and 2 is final.
   assert(validation::snapshot_retry_available(0, 0, false, 3, 3));
@@ -480,10 +520,11 @@ void test_graph_live_extent_reconstructs_canonical_record() {
   assert(validation::snapshot_retry_available(2, 2, false, 5, 3));
   assert(validation::snapshot_retry_available(3, 2, false, 5, 3));
   assert(!validation::snapshot_retry_available(4, 2, false, 5, 3));
-  // R=128 plus eight provisional slots requires 17 classes; a four-bit
-  // encoding would silently truncate this supported layout.
+  // R=128 plus eight provisional slots must not be truncated by the
+  // class encoding at any supported quantization.
   assert(validation::graph_extent_bytes_for_class(
-           17, 16 + 136 * sizeof(u64), 136) == 16 + 136 * sizeof(u64));
+           class_for(136), 16 + 136 * sizeof(u64), 136) ==
+         16 + 136 * sizeof(u64));
 
   std::array<byte_t, record_bytes> authoritative{};
   authoritative[0] = 47;
@@ -504,7 +545,8 @@ void test_graph_live_extent_reconstructs_canonical_record() {
            graph_capacity, 0) == validation::SnapshotState::valid);
 
   const u32 extent_bytes =
-    validation::graph_extent_bytes_for_class(7, record_bytes, graph_capacity);
+    validation::graph_extent_bytes_for_class(
+      class_for(49), record_bytes, graph_capacity);
   assert(validation::checksum16_zero_extended_prefix(
            authoritative.data(), extent_bytes, authoritative.size()) ==
          checksum);
@@ -520,8 +562,8 @@ void test_graph_live_extent_reconstructs_canonical_record() {
     required_bytes));
   assert(required_bytes == 16 + 49 * sizeof(u64));
   assert(required_bytes <= extent_bytes);
-  // Class rounding fetched seven inactive slots. They are outside the logical
-  // prefix and outside the decoder's count, so checksum validation need not
+  // Class rounding fetches only inactive slots beyond the logical prefix.
+  // They are outside the decoder's count, so checksum validation need not
   // read them. Even a concurrently written unpublished slot can be ignored as
   // part of the still-valid old logical snapshot.
   reconstructed[required_bytes + 3] = 0x4b;
@@ -572,7 +614,8 @@ void test_graph_live_extent_reconstructs_canonical_record() {
   // A build-time hint that is now one class too small must be detected from
   // the returned header before checksum acceptance or neighbor decoding.
   const u32 stale_extent_bytes =
-    validation::graph_extent_bytes_for_class(6, record_bytes, graph_capacity);
+    validation::graph_extent_bytes_for_class(
+      class_for(49) - 1, record_bytes, graph_capacity);
   assert(stale_extent_bytes < required_bytes);
   assert(validation::required_live_extent_bytes(
     reconstructed.data(), stale_extent_bytes, graph_degree, graph_capacity,

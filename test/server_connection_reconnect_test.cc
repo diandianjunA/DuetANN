@@ -46,32 +46,37 @@ int main() {
     return 0;
   }
 
+  constexpr u32 client_count = 3;
+  constexpr std::array<u32, client_count> connection_order{0, 2, 1};
   configuration::Configuration server_config;
-  server_config.num_clients = 2;
+  server_config.num_clients = client_count;
   server_config.port = available_port();
   Context server_context(server_config);
   ServerConnectionManager server(server_context, server_config);
 
-  std::array<configuration::Configuration, 2> client_configs;
-  std::array<std::unique_ptr<Context>, 2> client_contexts;
-  for (u32 client = 0; client < 2; ++client) {
+  std::array<configuration::Configuration, client_count> client_configs;
+  std::array<std::unique_ptr<Context>, client_count> client_contexts;
+  for (u32 client = 0; client < client_count; ++client) {
     client_configs[client].port = server_config.port;
     client_contexts[client] =
       std::make_unique<Context>(client_configs[client]);
   }
-  QPs client_qps(2);
+  QPs client_qps(client_count);
 
   std::thread initial_accept([&] { server.connect_to_clients(); });
-  for (u32 client = 0; client < 2; ++client) {
+  for (u32 client : connection_order) {
     client_qps[client] = client_contexts[client]->connect_to_server(
       "127.0.0.1", server_config.port, client);
   }
   initial_accept.join();
   assert(server.initiator_qp == server.client_qps.front().get());
+  for (const QP& qp : server.client_qps) {
+    assert(qp != nullptr);
+  }
 
   std::atomic<bool> shutdown{false};
   std::thread reconnect_accept([&] { server.accept_reconnection(shutdown); });
-  for (u32 client = 0; client < 2; ++client) {
+  for (u32 client : connection_order) {
     client_qps[client] = client_contexts[client]->connect_to_server(
       "127.0.0.1", server_config.port, client);
   }
@@ -85,7 +90,7 @@ int main() {
   assert(server.initiator_qp == nullptr);
   server.connect_to_clients();
   assert(server.initiator_qp == server.client_qps.front().get());
-  for (u32 client = 0; client < 2; ++client) {
+  for (u32 client = 0; client < client_count; ++client) {
     assert(server.client_qps[client] != nullptr);
     assert(server.pending_reconnected_qps[client] == nullptr);
   }

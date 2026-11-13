@@ -227,7 +227,7 @@ bool PersistentSearchEngine::Impl::wait_for_maintenance(
   for (size_t shard = 0; shard < controls.size(); ++shard) {
     next_sequences[shard] = controls[shard].next_maintenance_sequence;
   }
-  const std::vector<u64> effective_targets =
+  std::vector<u64> effective_targets =
     maintenance_fence::capture_targets(target_sequences, next_sequences);
   if (effective_target_sequences != nullptr) {
     *effective_target_sequences = effective_targets;
@@ -239,7 +239,16 @@ bool PersistentSearchEngine::Impl::wait_for_maintenance(
     bool complete = controls.size() == effective_targets.size();
     for (size_t shard = 0; shard < controls.size(); ++shard) {
       observed[shard] = controls[shard].durable_maintenance_sequence;
-      complete = complete && observed[shard] >= effective_targets[shard];
+      next_sequences[shard] = controls[shard].next_maintenance_sequence;
+      const auto latest_targets = maintenance_fence::capture_targets(
+        std::span<const u64>{effective_targets}.first(shard + 1),
+        std::span<const u64>{next_sequences}.first(shard + 1));
+      effective_targets[shard] = latest_targets[shard];
+      complete = complete && observed[shard] >= effective_targets[shard] &&
+        observed[shard] >= next_sequences[shard] - 1;
+    }
+    if (effective_target_sequences != nullptr) {
+      *effective_target_sequences = effective_targets;
     }
     if (durable_sequences != nullptr) *durable_sequences = observed;
     if (complete) return true;

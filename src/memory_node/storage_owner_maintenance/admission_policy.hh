@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -153,6 +154,20 @@ inline bool release_maintenance_queue_batch_permit(
   if (released_slots == 0 || released_slots > reserved_slots) return false;
   reserved_slots -= released_slots;
   return true;
+}
+
+inline bool refinement_insert_admission_allowed(
+    bool backpressure_active, bool queue_permit_available) {
+  return !backpressure_active && queue_permit_available;
+}
+
+inline bool refinement_retry_deadline_exceeded(
+    std::chrono::steady_clock::time_point first_retry,
+    std::chrono::steady_clock::time_point now,
+    std::uint32_t max_retry_ms) {
+  return max_retry_ms != 0 &&
+    first_retry != std::chrono::steady_clock::time_point{} &&
+    now - first_retry > std::chrono::milliseconds(max_retry_ms);
 }
 
 inline Stage2AdmissionDecision decide_stage2_admission(

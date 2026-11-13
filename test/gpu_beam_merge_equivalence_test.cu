@@ -169,6 +169,10 @@ void run_case(
 #if !DVSTOR_PERSISTENT_LEGACY_MERGE
     if (policy == BeamMergePolicy::legacy) continue;
 #endif
+    if (policy == BeamMergePolicy::legacy &&
+        beam_capacity > gpu_search::kPersistentMaxBeam) {
+      continue;
+    }
     // The register top-k reduction supports beam_capacity <=
     // kPersistentMaxBeam (the production traversal beam ceiling); wider
     // stable-run beams exist only in the 256-thread wide build.

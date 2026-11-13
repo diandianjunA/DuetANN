@@ -3,6 +3,8 @@
 #include "memory_node/storage_owner_index/robust_prune_policy.hh"
 #include "memory_node/storage_owner_index/stage1_reachability_policy.hh"
 
+#include <cstdlib>
+
 using namespace memory_node_storage_owner_index_detail;
 
 vec<RemotePtr> MemoryNode::robust_prune_cpu(const byte_t* source,
@@ -114,7 +116,9 @@ vec<RemotePtr> MemoryNode::robust_prune_snapshots_cpu(
     span<const NodeSnapshot> candidates,
     const hashset_t<RemotePtr>& skip,
     const Configuration& config,
-    u32 result_limit_override) {
+    u32 result_limit_override,
+    bool include_provisional,
+    size_t existing_count) {
   thread_local vec<const NodeSnapshot*> references;
   references.clear();
   references.reserve(candidates.size());
@@ -123,7 +127,7 @@ vec<RemotePtr> MemoryNode::robust_prune_snapshots_cpu(
   }
   return robust_prune_snapshot_refs_cpu(
     source, source_dtype, span<const NodeSnapshot* const>{references}, skip,
-    config, result_limit_override);
+    config, result_limit_override, include_provisional, existing_count);
 }
 
 vec<RemotePtr> MemoryNode::robust_prune_snapshot_refs_cpu(
@@ -132,7 +136,9 @@ vec<RemotePtr> MemoryNode::robust_prune_snapshot_refs_cpu(
     span<const NodeSnapshot* const> candidates,
     const hashset_t<RemotePtr>& skip,
     const Configuration& config,
-    u32 result_limit_override) {
+    u32 result_limit_override,
+    bool include_provisional,
+    size_t existing_count) {
   const u32 result_limit = result_limit_override == 0
                              ? config.R
                              : std::min(config.R, result_limit_override);
@@ -161,11 +167,14 @@ vec<RemotePtr> MemoryNode::robust_prune_snapshot_refs_cpu(
   scored.reserve(candidates.size());
   seen.reserve(candidates.size());
   selected.reserve(result_limit);
-  for (const NodeSnapshot* candidate_pointer : candidates) {
+  for (size_t candidate_index = 0; candidate_index < candidates.size();
+       ++candidate_index) {
+    const NodeSnapshot* candidate_pointer = candidates[candidate_index];
     if (candidate_pointer == nullptr) continue;
     const NodeSnapshot& candidate = *candidate_pointer;
     if (candidate.rptr.is_null() || candidate.deleted ||
-        (candidate.header & VamanaNode::HEADER_PROVISIONAL) != 0 ||
+        (!include_provisional &&
+         (candidate.header & VamanaNode::HEADER_PROVISIONAL) != 0) ||
         candidate.vector_data.size() < VamanaNode::vector_bytes() ||
         skip.contains(candidate.rptr) || !seen.insert(candidate.rptr).second) {
       continue;
@@ -176,13 +185,48 @@ vec<RemotePtr> MemoryNode::robust_prune_snapshot_refs_cpu(
                                source_dtype,
                                candidate.vector_data.data(),
                                VamanaNode::vector_dtype(),
-                               config)});
+                               config),
+      candidate_index < existing_count});
   }
   std::sort(scored.begin(), scored.end(),
             [](const StorageOwnerScoredSnapshot& lhs,
                const StorageOwnerScoredSnapshot& rhs) {
               return lhs.distance < rhs.distance;
             });
+  if (config.alpha < 0 && existing_count != 0) {
+    incremental_robust_pruned_sorted_by_pair_predicate(
+      span<const StorageOwnerScoredSnapshot>{scored.data(), scored.size()},
+      [](const StorageOwnerScoredSnapshot& candidate) {
+        return candidate.existing;
+      },
+      result_limit,
+      [](const StorageOwnerScoredSnapshot& candidate) {
+        return candidate.snapshot->rptr;
+      },
+      [](const StorageOwnerScoredSnapshot& candidate) {
+        return candidate.distance;
+      },
+      [&](const StorageOwnerScoredSnapshot& candidate,
+          const StorageOwnerScoredSnapshot& retained,
+          const distance_t source_distance) {
+        return typed_l2_distance_alpha_leq_source(
+          candidate.snapshot->vector_data.data(),
+          VamanaNode::vector_dtype(),
+          retained.snapshot->vector_data.data(),
+          VamanaNode::vector_dtype(),
+          config.dim, -config.alpha, source_distance);
+      },
+      selected, selected_indices);
+    return selected;
+  }
+  if (config.alpha <= 0) {
+    selected.clear();
+    const size_t count = std::min<size_t>(result_limit, scored.size());
+    for (size_t index = 0; index < count; ++index) {
+      selected.push_back(scored[index].snapshot->rptr);
+    }
+    return selected;
+  }
   select_alpha_robust_pruned_sorted_by_pair_predicate(
     span<const StorageOwnerScoredSnapshot>{scored.data(), scored.size()},
     result_limit,
@@ -395,6 +439,17 @@ vec<RemotePtr> MemoryNode::install_local_provisional_backlinks(
       write_graph_adjacency(target, adjacency.stable,
                             adjacency.provisional,
                             adjacency.generation, false);
+      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        const node_t candidate_id = *reinterpret_cast<const node_t*>(
+          local_node_ptr(candidate) + VamanaNode::offset_id());
+        if (candidate_id < 100000016) {
+          std::cerr << "[stage1-bridge-debug] id=" << candidate_id
+                    << " parent=" << target.raw_address
+                    << " child=" << candidate.raw_address
+                    << " provisional=" << adjacency.provisional.size()
+                    << std::endl;
+        }
+      }
       unlock_node(target);
       return InstallDisposition::installed;
   };

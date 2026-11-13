@@ -302,7 +302,8 @@ void HostOrchestratedSearchEngine::Impl::initialize() {
   const bool consume_graph_extents =
     config.gpu_query_graph_read_policy == "live-extent";
   const bool validate_graph_extent_sidecar =
-    consume_graph_extents || config.dynamic_graph_access_mode != "manual";
+    config.gpu_dynamic_graph_extent_hints &&
+    (consume_graph_extents || config.dynamic_graph_access_mode != "manual");
   if (validate_graph_extent_sidecar) {
     format::GraphExtentHeader header{};
     std::vector<u8> validated_classes;

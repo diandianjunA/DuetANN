@@ -4,21 +4,9 @@ include(cpu_tests.cmake)
 dvstor_add_test(breakdown_aggregate_test)
 target_link_libraries(breakdown_aggregate_test PRIVATE dvstor_runtime)
 
-add_test(NAME mn_memory_estimator_test
-         COMMAND bash ${CMAKE_SOURCE_DIR}/test/mn_memory_estimator_test.sh
-                      ${CMAKE_SOURCE_DIR})
-
-add_test(NAME experiment_profile_contract_test
-         COMMAND bash
-                 ${CMAKE_SOURCE_DIR}/test/experiment_profile_contract_test.sh)
-
-add_test(NAME spacev_data_preparation_test
+add_test(NAME experiment_config_contract_test
          COMMAND python3
-                 ${CMAKE_SOURCE_DIR}/test/spacev_data_preparation_test.py)
-
-add_test(NAME deep_data_preparation_test
-         COMMAND python3
-                 ${CMAKE_SOURCE_DIR}/test/deep_data_preparation_test.py)
+                 ${CMAKE_SOURCE_DIR}/test/experiment_config_contract_test.py)
 
 dvstor_add_test(breakdown_benchmark_support_test)
 dvstor_target_tool_includes(breakdown_benchmark_support_test)
@@ -36,6 +24,7 @@ target_link_libraries(common_atomic_utils_test PRIVATE dvstor_runtime)
 
 dvstor_add_test(adaptive_frontier_policy_test)
 dvstor_target_common_includes(adaptive_frontier_policy_test)
+target_sources(adaptive_frontier_policy_test PRIVATE ${DVSTOR_SOURCE_ROOT}/src/common/configuration.cc)
 target_link_libraries(adaptive_frontier_policy_test PRIVATE rdma_library)
 
 dvstor_add_test(storage_owner_wire_size_test)
@@ -44,11 +33,17 @@ dvstor_target_common_includes(storage_owner_wire_size_test)
 dvstor_add_test(storage_owner_graph_pointer_validation_test)
 dvstor_target_common_includes(storage_owner_graph_pointer_validation_test)
 
+dvstor_add_test(graph_extent_cache_test)
+dvstor_target_common_includes(graph_extent_cache_test)
+
 dvstor_add_test(core_partition_test)
 dvstor_target_common_includes(core_partition_test)
 
 dvstor_add_test(peer_rdma_credit_policy_test)
 dvstor_target_common_includes(peer_rdma_credit_policy_test)
+
+dvstor_add_test(gpu_rdma_read_budget_test)
+dvstor_target_common_includes(gpu_rdma_read_budget_test)
 
 dvstor_add_test(stage1_control_fanout_policy_test)
 dvstor_target_common_includes(stage1_control_fanout_policy_test)
@@ -58,6 +53,9 @@ dvstor_target_common_includes(stage2_score_round_robin_test)
 
 dvstor_add_test(bounded_update_primitives_test)
 target_link_libraries(bounded_update_primitives_test PRIVATE dvstor_runtime)
+
+dvstor_add_test(ordered_commit_policy_test)
+dvstor_target_common_includes(ordered_commit_policy_test)
 
 dvstor_add_test(compute_update_hot_path_test)
 target_link_libraries(compute_update_hot_path_test PRIVATE dvstor_runtime)
@@ -79,6 +77,10 @@ if (TARGET FaissCPU::FaissCPU)
     dvstor_target_tool_includes(legacy_index_converter_test)
     target_link_libraries(legacy_index_converter_test PRIVATE
         rdma_library FaissCPU::FaissCPU)
+
+    dvstor_add_test(pq_encoder_equivalence_test)
+    target_link_libraries(pq_encoder_equivalence_test PRIVATE
+        dvstor_runtime FaissCPU::FaissCPU)
 endif ()
 
 dvstor_add_test(dynamic_allocation_receipt_policy_test)
@@ -136,6 +138,9 @@ dvstor_target_common_includes(maintenance_fence_test)
 dvstor_add_test(maintenance_telemetry_test)
 dvstor_target_common_includes(maintenance_telemetry_test)
 
+dvstor_add_test(telemetry_counter_test)
+dvstor_target_common_includes(telemetry_counter_test)
+
 dvstor_add_test(lease_merge_policy_test)
 dvstor_target_common_includes(lease_merge_policy_test)
 
@@ -150,6 +155,7 @@ if (TARGET dvstor_gpu_kernels)
         SKIP_REGULAR_EXPRESSION "^SKIP:")
 
     dvstor_add_cuda_test(gpu_centroid_route_ranking_test 15)
+    dvstor_add_cuda_test(gpu_warp_reduction_test 15)
     dvstor_add_cuda_test(gpu_compact_beam_merge_test 15)
     dvstor_add_cuda_test(gpu_pq_packed_scoring_test 15)
     dvstor_add_cuda_test(gpu_pq_scoring_microbench 120)
@@ -175,13 +181,15 @@ if (TARGET dvstor_gpu_kernels)
         COMMAND gpu_persistent_dispatch_test 128 10 8 32 256)
     # Each test selects device 0. Persistent kernels can prevent another
     # process from making progress, so serialize GPU tests under ctest -j.
+    # Cross-architecture builds can spend two minutes in PTX JIT during the
+    # first occupancy inspection; query dispatch retains its own 10s deadline.
     set_tests_properties(
         gpu_persistent_dispatch_test
         gpu_persistent_dispatch_pq32_test
         gpu_persistent_dispatch_pq20_test
         gpu_persistent_dispatch_pq25_test
         gpu_persistent_dispatch_256_test PROPERTIES
-        TIMEOUT 15
+        TIMEOUT 180
         RESOURCE_LOCK dvstor_gpu
         SKIP_REGULAR_EXPRESSION "^SKIP:")
 endif ()

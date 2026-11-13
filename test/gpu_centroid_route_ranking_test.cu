@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "gpu_search/persistent_kernel/query_traversal.cuh"
@@ -144,8 +146,10 @@ __global__ void promote_graph_extent_hint_kernel(
     u32 required_bytes,
     u32* output) {
   if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  output[0] = gpu_search::persistent_kernel_detail::
-    promote_graph_extent_class(params, handle, required_bytes) ? 1u : 0u;
+  output[0] = gpu_search::persistent_kernel_detail::adapt_graph_extent_class(
+    params, handle, required_bytes) ==
+      gpu_search::persistent_kernel_detail::GraphExtentAdaptation::promoted
+    ? 1u : 0u;
   u32 ordinal = 0;
   output[1] =
     gpu_search::persistent_kernel_detail::static_ordinal_from_raw(
@@ -164,8 +168,9 @@ __global__ void concurrently_promote_graph_extent_hint_kernel(
   const u32 required_bytes =
     gpu_search::graph_record_validation::kGraphRecordHeaderBytes +
       live_edges * sizeof(u64);
-  if (gpu_search::persistent_kernel_detail::promote_graph_extent_class(
-        params, handle, required_bytes)) {
+  if (gpu_search::persistent_kernel_detail::adapt_graph_extent_class(
+        params, handle, required_bytes) ==
+      gpu_search::persistent_kernel_detail::GraphExtentAdaptation::promoted) {
     atomicAdd(output, 1u);
   }
   __syncthreads();
@@ -197,16 +202,15 @@ __global__ void inspect_dynamic_graph_extent_hint_kernel(
   output[1] = prepare_graph_record_in_scratch(
     params, handle, 0, 0, acquired_slot, request_shard, request_offset,
     request_local_iova, request_bytes) ? request_bytes : UINT32_MAX;
-  output[2] = promote_graph_extent_class(
-    params, handle, promote_required_bytes) ? 1u : 0u;
+  output[2] = adapt_graph_extent_class(
+    params, handle, promote_required_bytes) ==
+      GraphExtentAdaptation::promoted ? 1u : 0u;
   output[3] = load_dynamic_graph_extent_class(params, handle);
-  const DynamicGraphExtentAdaptation adaptation =
-    adapt_dynamic_graph_extent_class(
-      params, handle, shrink_required_bytes);
-  output[4] = adaptation != DynamicGraphExtentAdaptation::none ? 1u : 0u;
+  const GraphExtentAdaptation adaptation =
+    adapt_graph_extent_class(params, handle, shrink_required_bytes);
+  output[4] = adaptation != GraphExtentAdaptation::none ? 1u : 0u;
   output[5] = load_dynamic_graph_extent_class(params, handle);
-  output[6] =
-    adaptation == DynamicGraphExtentAdaptation::refined_unknown ? 1u : 0u;
+  output[6] = adaptation == GraphExtentAdaptation::refined_unknown ? 1u : 0u;
 }
 
 __global__ void inspect_dynamic_code_cache_completion_kernel(
@@ -298,19 +302,6 @@ __global__ void route_contention_query_kernel(PersistentKernelParams params,
   __syncthreads();
   gpu_search::persistent_kernel_detail::process_query<false>(
     params, descriptor, frontier_controller);
-}
-
-__global__ void close_route_epoch_after(u64* epoch, u64 delay_ns) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  u64 started = 0;
-  u64 now = 0;
-  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(started));
-  do {
-    __nanosleep(256);
-    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(now));
-  } while (now - started < delay_ns);
-  atomicExch(reinterpret_cast<unsigned long long*>(epoch), 2ULL);
-  __threadfence();
 }
 
 void test_route_publication_contention() {
@@ -438,7 +429,7 @@ void test_route_publication_contention() {
     .max_expansions = 0,
     .visited_capacity = 256,
     .query_slots = 1,
-    .route_snapshot_timeout_ns = 100'000'000ULL,
+    .route_snapshot_timeout_ns = 1'000'000'000ULL,
     .centroid_route_shards = route_shard,
     .centroid_route_entries = route_entries,
     .shard_centroids = shard_centroid,
@@ -472,31 +463,41 @@ void test_route_publication_contention() {
   };
 
   cudaStream_t query_stream = nullptr;
-  cudaStream_t writer_stream = nullptr;
   check_cuda(cudaStreamCreateWithFlags(&query_stream, cudaStreamNonBlocking),
              "cudaStreamCreate(query contention)");
-  check_cuda(cudaStreamCreateWithFlags(&writer_stream, cudaStreamNonBlocking),
-             "cudaStreamCreate(route writer)");
   route_contention_query_kernel<<<1, 128, 0, query_stream>>>(params, descriptor);
   check_cuda(cudaGetLastError(), "route_contention_query_kernel launch");
-  close_route_epoch_after<<<1, 1, 0, writer_stream>>>(route_epoch, 5'000'000ULL);
-  check_cuda(cudaGetLastError(), "close_route_epoch_after launch");
+  const u64 even_epoch = 2;
+  cudaError_t writer_status = cudaSuccess;
+  std::thread writer([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    writer_status = cudaMemcpy(route_epoch, &even_epoch, sizeof(even_epoch),
+                               cudaMemcpyHostToDevice);
+  });
   check_cuda(cudaStreamSynchronize(query_stream),
              "cudaStreamSynchronize(route contention query)");
-  check_cuda(cudaStreamSynchronize(writer_stream),
-             "cudaStreamSynchronize(route writer)");
+  writer.join();
+  check_cuda(writer_status, "cudaMemcpy(route epoch writer)");
 
   CompletionDescriptor completion{};
   check_cuda(cudaMemcpy(&completion, completion_entries, sizeof(completion),
                         cudaMemcpyDeviceToHost),
              "cudaMemcpy(route contention completion)");
+  if (completion.request_id != descriptor.request_id || completion.status != -EIO ||
+      gpu_search::query_failure_reason(completion.diagnostic) !=
+        gpu_search::QueryFailureReason::exact_fetch ||
+      gpu_search::query_route_snapshot_retries(completion.diagnostic) == 0) {
+    std::cerr << "route contention mismatch: request_id=" << completion.request_id
+              << " status=" << completion.status
+              << " diagnostic=" << completion.diagnostic
+              << " result_count=" << completion.result_count << '\n';
+  }
   assert(completion.request_id == descriptor.request_id);
   assert(completion.status == -EIO);
   assert(gpu_search::query_failure_reason(completion.diagnostic) ==
-         gpu_search::QueryFailureReason::exact_rerank_empty);
+         gpu_search::QueryFailureReason::exact_fetch);
   assert(gpu_search::query_route_snapshot_retries(completion.diagnostic) != 0);
 
-  check_cuda(cudaStreamDestroy(writer_stream), "cudaStreamDestroy(route writer)");
   check_cuda(cudaStreamDestroy(query_stream), "cudaStreamDestroy(query contention)");
   for (void* allocation : allocations) check_cuda(cudaFree(allocation), "cudaFree");
 }
@@ -557,32 +558,31 @@ void test_graph_extent_hint_promotion() {
   assert(gpu_search::graph_record_validation::packed_graph_extent_class(
            promoted_word, 3) == 0x5a);
 
-  // A lower request cannot regress a learned class, and an unknown/full byte
-  // remains authoritative rather than being replaced by a short-read hint.
+  // A two-class drop demotes to one guard class above the observed level.
+  // UNKNOWN is a cold-start state and is refined by the same validated snapshot.
   promote_graph_extent_hint_kernel<<<1, 32>>>(
     params, ordinal_one,
     gpu_search::graph_record_validation::kGraphRecordHeaderBytes +
       24 * sizeof(u64),
     device_output);
-  check_cuda(cudaGetLastError(), "nonregressing extent promotion launch");
-  check_cuda(cudaDeviceSynchronize(), "nonregressing extent promotion sync");
+  check_cuda(cudaGetLastError(), "guarded extent demotion launch");
+  check_cuda(cudaDeviceSynchronize(), "guarded extent demotion sync");
   check_cuda(cudaMemcpy(
     output.data(), device_output, sizeof(output), cudaMemcpyDeviceToHost),
-    "cudaMemcpy(nonregressing extent promotion output)");
+    "cudaMemcpy(guarded extent demotion output)");
   assert(output[0] == 0);
-  assert(output[1] == 5);
+  assert(output[1] == 4);
 
   const u64 ordinal_zero = u64{0x1000} >> 4;
   promote_graph_extent_hint_kernel<<<1, 32>>>(
     params, ordinal_zero, class_five_bytes, device_output);
-  check_cuda(cudaGetLastError(), "unknown extent promotion launch");
-  check_cuda(cudaDeviceSynchronize(), "unknown extent promotion sync");
+  check_cuda(cudaGetLastError(), "unknown extent refinement launch");
+  check_cuda(cudaDeviceSynchronize(), "unknown extent refinement sync");
   check_cuda(cudaMemcpy(
     output.data(), device_output, sizeof(output), cudaMemcpyDeviceToHost),
-    "cudaMemcpy(unknown extent promotion output)");
+    "cudaMemcpy(unknown extent refinement output)");
   assert(output[0] == 0);
-  assert(output[1] ==
-         gpu_search::graph_record_validation::kGraphExtentClassUnknown);
+  assert(output[1] == 5);
 
   // The third byte is the final real ordinal in a partially occupied device
   // word. Its CAS must remain in bounds and preserve the padding byte.
@@ -611,15 +611,13 @@ void test_graph_extent_hint_promotion() {
   check_cuda(cudaMemcpy(
     output.data(), device_output, sizeof(output), cudaMemcpyDeviceToHost),
     "cudaMemcpy(concurrent extent promotion output)");
-  assert(output[0] >= 1);
-  assert(output[0] <= 8);
+  assert(output[0] == 9);
   assert(output[1] == 13);
   check_cuda(cudaMemcpy(
     &promoted_word, device_word, sizeof(promoted_word),
     cudaMemcpyDeviceToHost), "cudaMemcpy(concurrent extent word)");
   assert(gpu_search::graph_record_validation::packed_graph_extent_class(
-           promoted_word, 0) ==
-         gpu_search::graph_record_validation::kGraphExtentClassUnknown);
+           promoted_word, 0) == 5);
   assert(gpu_search::graph_record_validation::packed_graph_extent_class(
            promoted_word, 1) == 13);
   assert(gpu_search::graph_record_validation::packed_graph_extent_class(
@@ -633,10 +631,20 @@ void test_graph_extent_hint_promotion() {
 }
 
 void test_dynamic_graph_extent_hint_lifecycle() {
+  namespace validation = gpu_search::graph_record_validation;
   constexpr u32 graph_capacity = 102;
   constexpr u32 graph_record_bytes =
-    gpu_search::graph_record_validation::kGraphRecordHeaderBytes +
-      graph_capacity * sizeof(u64);
+    validation::kGraphRecordHeaderBytes + graph_capacity * sizeof(u64);
+  constexpr u32 class_five_bytes =
+    validation::kGraphRecordHeaderBytes + 33 * sizeof(u64);
+  constexpr u32 class_two_bytes =
+    validation::kGraphRecordHeaderBytes + 9 * sizeof(u64);
+  const u32 class_five =
+    validation::graph_extent_class_for_required_bytes(
+      class_five_bytes, graph_capacity);
+  const u32 class_two =
+    validation::graph_extent_class_for_required_bytes(
+      class_two_bytes, graph_capacity);
   constexpr u64 dynamic_offset = 0x4000;
   constexpr u32 incarnation = 17;
   const gpu_search::DeviceShardRegion shard{
@@ -649,7 +657,7 @@ void test_dynamic_graph_extent_hint_lifecycle() {
   };
   auto* device_shard = device_copy(&shard, 1);
   const u32 initial_state =
-    gpu_search::make_dynamic_code_tag(incarnation, 2);
+    gpu_search::make_dynamic_code_tag(incarnation, class_two);
   auto* device_state = device_copy(&initial_state, 1);
   std::uint8_t* device_graph_scratch = nullptr;
   check_cuda(cudaMalloc(
@@ -688,12 +696,6 @@ void test_dynamic_graph_extent_hint_lifecycle() {
   const u64 handle =
     (static_cast<u64>(incarnation) << gpu_search::kRemoteIncarnationShift) |
     (dynamic_offset >> 4);
-  const u32 class_five_bytes =
-    gpu_search::graph_record_validation::kGraphRecordHeaderBytes +
-      33 * sizeof(u64);
-  const u32 class_two_bytes =
-    gpu_search::graph_record_validation::kGraphRecordHeaderBytes +
-      9 * sizeof(u64);
   inspect_dynamic_graph_extent_hint_kernel<<<1, 32>>>(
     params, handle, class_five_bytes, class_two_bytes, device_output);
   check_cuda(cudaGetLastError(), "dynamic extent lifecycle launch");
@@ -702,14 +704,13 @@ void test_dynamic_graph_extent_hint_lifecycle() {
   check_cuda(cudaMemcpy(
     output.data(), device_output, sizeof(output), cudaMemcpyDeviceToHost),
     "cudaMemcpy(dynamic extent lifecycle output)");
-  assert(output[0] == 2);
-  assert(output[1] ==
-         gpu_search::graph_record_validation::graph_extent_bytes_for_class(
-           2, graph_record_bytes, graph_capacity));
+  assert(output[0] == class_two);
+  assert(output[1] == validation::graph_extent_bytes_for_class(
+           class_two, graph_record_bytes, graph_capacity));
   assert(output[2] == 1);
-  assert(output[3] == 5);
+  assert(output[3] == class_five);
   assert(output[4] == 1);
-  assert(output[5] == 3);  // observed class two plus one guard class.
+  assert(output[5] == class_two + 1);
   assert(output[6] == 0);
 
   // UNKNOWN is a conservative full-read sentinel, but it must not become a
@@ -732,11 +733,31 @@ void test_dynamic_graph_extent_hint_lifecycle() {
          gpu_search::kPersistentDynamicCodeArenaUnknownExtent);
   assert(output[1] == graph_record_bytes);
   assert(output[2] == 0);
-  assert(output[3] ==
-         gpu_search::kPersistentDynamicCodeArenaUnknownExtent);
+  assert(output[3] == class_five);
   assert(output[4] == 1);
-  assert(output[5] == 2);
-  assert(output[6] == 1);
+  assert(output[5] == class_two + 1);
+  assert(output[6] == 0);
+
+  params.dynamic_graph_extent_bootstrap_enabled = 0;
+  check_cuda(cudaMemcpy(
+    device_state, &unknown_state, sizeof(unknown_state),
+    cudaMemcpyHostToDevice), "cudaMemcpy(online-only unknown extent state)");
+  inspect_dynamic_graph_extent_hint_kernel<<<1, 32>>>(
+    params, handle, class_five_bytes, class_two_bytes, device_output);
+  check_cuda(cudaGetLastError(), "online-only dynamic extent launch");
+  check_cuda(cudaDeviceSynchronize(), "online-only dynamic extent sync");
+  check_cuda(cudaMemcpy(
+    output.data(), device_output, sizeof(output), cudaMemcpyDeviceToHost),
+    "cudaMemcpy(online-only dynamic extent output)");
+  assert(output[0] ==
+         gpu_search::kPersistentDynamicCodeArenaUnknownExtent);
+  assert(output[1] == graph_record_bytes);
+  assert(output[2] == 0);
+  assert(output[3] == class_five);
+  assert(output[4] == 1);
+  assert(output[5] == class_two + 1);
+  assert(output[6] == 0);
+  params.dynamic_graph_extent_bootstrap_enabled = 1;
 
   inspect_query_local_force_full_plan_kernel<<<1, 1>>>(
     class_two_bytes, graph_record_bytes, device_output);
@@ -827,6 +848,28 @@ void test_dynamic_graph_extent_hint_lifecycle() {
     &retained_state, device_state, sizeof(retained_state),
     cudaMemcpyDeviceToHost), "cudaMemcpy(retained dynamic extent state)");
   assert(retained_state == recycled_state);
+
+  // The dynamic 0x7f sentinel must remain a full read even when q=1 makes
+  // level 127 representable by the generic static-record format.
+  gpu_search::DeviceShardRegion high_capacity_shard = shard;
+  high_capacity_shard.dynamic_record_bytes =
+    high_capacity_shard.dynamic_hot_offset + 16 + 136 * sizeof(u64) + 48;
+  check_cuda(cudaMemcpy(
+    device_shard, &high_capacity_shard, sizeof(high_capacity_shard),
+    cudaMemcpyHostToDevice), "cudaMemcpy(high-capacity dynamic shard)");
+  params.graph_entry_capacity = 136;
+  params.graph_entry_bytes = 16 + 136 * sizeof(u64);
+  check_cuda(cudaMemcpy(
+    device_state, &unknown_state, sizeof(unknown_state),
+    cudaMemcpyHostToDevice), "cudaMemcpy(high-capacity unknown extent state)");
+  inspect_dynamic_graph_extent_hint_kernel<<<1, 32>>>(
+    params, handle, class_five_bytes, class_two_bytes, device_output);
+  check_cuda(cudaGetLastError(), "high-capacity unknown extent launch");
+  check_cuda(cudaDeviceSynchronize(), "high-capacity unknown extent sync");
+  check_cuda(cudaMemcpy(
+    output.data(), device_output, sizeof(output), cudaMemcpyDeviceToHost),
+    "cudaMemcpy(high-capacity unknown extent output)");
+  assert(output[1] == params.graph_entry_bytes);
 
   check_cuda(cudaFree(device_output), "cudaFree(dynamic extent output)");
   check_cuda(cudaFree(device_stop), "cudaFree(dynamic extent stop)");

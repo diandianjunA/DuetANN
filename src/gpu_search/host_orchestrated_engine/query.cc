@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <cfloat>
 #include <cmath>
 #include <cstring>
@@ -248,7 +249,9 @@ void HostOrchestratedSearchEngine::Impl::fetch_graph_wave(
     }
     u8 extent_class = graph_record_validation::kGraphExtentClassUnknown;
     if (adaptive && record.immutable_base) {
-      extent_class = graph_extent_classes[record.static_ordinal];
+      extent_class = std::atomic_ref<const u8>(
+        graph_extent_classes[record.static_ordinal]).load(
+          std::memory_order_relaxed);
     } else if (adaptive && config.gpu_dynamic_graph_extent &&
                candidate.extent_class !=
                  VamanaNode::DYNAMIC_CODE_EXTENT_CLASS_UNKNOWN) {
@@ -339,24 +342,54 @@ void HostOrchestratedSearchEngine::Impl::fetch_graph_wave(
             graph_record_validation::graph_extent_class_for_required_bytes(
               required_bytes, graph_entry_capacity);
           Candidate& candidate = *wave[item];
-          if (!state.record.immutable_base && config.gpu_dynamic_graph_extent &&
-              required_class !=
-                graph_record_validation::kGraphExtentClassUnknown) {
-            const u8 previous = candidate.extent_class;
-            if (previous != VamanaNode::DYNAMIC_CODE_EXTENT_CLASS_UNKNOWN) {
-              if (required_class > previous) {
-                engine.telemetry_.dynamic_graph_hint_promotions.fetch_add(
-                  1, std::memory_order_relaxed);
-              } else if (required_class < previous) {
+          if (required_class !=
+                graph_record_validation::kGraphExtentClassUnknown &&
+              (state.record.immutable_base || config.gpu_dynamic_graph_extent)) {
+            const auto note_transition = [&](const auto& transition) {
+              if (transition.adaptation ==
+                  vamana::graph_extent::Adaptation::promoted) {
+                if (state.record.immutable_base) {
+                  engine.telemetry_.graph_extent_hint_promotions.fetch_add(
+                    1, std::memory_order_relaxed);
+                } else {
+                  engine.telemetry_.dynamic_graph_hint_promotions.fetch_add(
+                    1, std::memory_order_relaxed);
+                }
+              } else if (!state.record.immutable_base &&
+                         transition.adaptation ==
+                           vamana::graph_extent::Adaptation::demoted) {
                 engine.telemetry_.dynamic_graph_hint_demotions.fetch_add(
                   1, std::memory_order_relaxed);
               }
+            };
+            if (state.record.immutable_base) {
+              std::atomic_ref<u8> cached_class(
+                graph_extent_classes[state.record.static_ordinal]);
+              u8 observed = cached_class.load(std::memory_order_relaxed);
+              for (;;) {
+                const auto transition = vamana::graph_extent::adapt_level(
+                  observed, required_class);
+                if (transition.adaptation ==
+                    vamana::graph_extent::Adaptation::none) {
+                  break;
+                }
+                if (cached_class.compare_exchange_weak(
+                      observed, transition.level,
+                      std::memory_order_relaxed, std::memory_order_relaxed)) {
+                  note_transition(transition);
+                  break;
+                }
+              }
+            } else {
+              const u8 cached_class = candidate.extent_class ==
+                VamanaNode::DYNAMIC_CODE_EXTENT_CLASS_UNKNOWN
+                ? vamana::graph_extent::kUnknownLevel
+                : candidate.extent_class;
+              const auto transition = vamana::graph_extent::adapt_level(
+                cached_class, required_class);
+              candidate.extent_class = transition.level;
+              note_transition(transition);
             }
-            candidate.extent_class = required_class;
-          } else if (state.record.immutable_base && state.started_partial &&
-                     !state.partial) {
-            engine.telemetry_.graph_extent_hint_promotions.fetch_add(
-              1, std::memory_order_relaxed);
           }
         }
         state.validated = true;

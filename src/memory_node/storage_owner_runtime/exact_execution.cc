@@ -380,7 +380,6 @@ bool MemoryNode::execute_storage_owner_batch_items_exact(
     lib_assert(committed == AuthorityCommitState::committed ||
                  committed == AuthorityCommitState::replay,
                "synchronous exact authority commit lost its active lease");
-
     if (statuses != nullptr) {
       (*statuses)[index] = static_cast<u32>(MutationStatus::ok);
     }

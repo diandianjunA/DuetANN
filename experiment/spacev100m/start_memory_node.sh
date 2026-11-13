@@ -1,1 +1,0 @@
-../common/start_memory_node.sh

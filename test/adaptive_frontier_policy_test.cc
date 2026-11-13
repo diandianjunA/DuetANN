@@ -13,8 +13,7 @@ namespace {
 namespace policy = gpu_search::adaptive_frontier;
 
 configuration::IndexConfiguration make_config(
-    u32 legacy_prefetch, u32 commit_width, u32 issue_width,
-    u32 traversal_beam_width) {
+    u32 commit_width, u32 issue_width, u32 traversal_beam_width) {
   std::vector<std::string> arguments{
     "adaptive_frontier_policy_test",
     "--servers", "127.0.0.1:1234",
@@ -23,7 +22,6 @@ configuration::IndexConfiguration make_config(
     "--threads", "1",
     "--dim", "128",
     "--k", "10",
-    "--gpu-graph-prefetch-depth", std::to_string(legacy_prefetch),
     "--gpu-graph-commit-width", std::to_string(commit_width),
     "--gpu-graph-issue-width", std::to_string(issue_width),
     "--gpu-traversal-beam-width", std::to_string(traversal_beam_width),
@@ -36,26 +34,23 @@ configuration::IndexConfiguration make_config(
 }
 
 void test_configuration_resolution() {
-  const auto legacy = make_config(16, 0, 0, 128);
-  assert(legacy.gpu_graph_prefetch_depth == 16);
+  const auto legacy = make_config(16, 0, 128);
   assert(legacy.gpu_graph_commit_width == 16);
   assert(legacy.gpu_graph_issue_width == 32);
 
-  const auto explicit_widths = make_config(16, 8, 24, 128);
+  const auto explicit_widths = make_config(8, 24, 128);
   assert(explicit_widths.gpu_graph_commit_width == 8);
   assert(explicit_widths.gpu_graph_issue_width == 24);
 
-  const auto beam_limited = make_config(16, 8, 0, 12);
+  const auto beam_limited = make_config(8, 0, 12);
   assert(beam_limited.gpu_graph_commit_width == 8);
   assert(beam_limited.gpu_graph_issue_width == 12);
 
-  // Old valid configurations remain valid even when their legacy prefetch
-  // depth was wider than the traversal beam.
-  const auto wide_legacy = make_config(24, 0, 0, 16);
-  assert(wide_legacy.gpu_graph_commit_width == 24);
-  assert(wide_legacy.gpu_graph_issue_width == 24);
+  const auto wide_commit = make_config(24, 0, 16);
+  assert(wide_commit.gpu_graph_commit_width == 24);
+  assert(wide_commit.gpu_graph_issue_width == 24);
 
-  const auto defaults = make_config(32, 0, 0, 128);
+  const auto defaults = make_config(32, 0, 128);
   assert(defaults.gpu_graph_commit_width > 0);
   assert(defaults.gpu_graph_commit_width <= defaults.gpu_graph_issue_width);
   assert(defaults.gpu_graph_issue_width <= policy::kFrontierCapacity);

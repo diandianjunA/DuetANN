@@ -51,6 +51,19 @@ inline StableNodeSnapshotState classify_stable_node_snapshot(
   return StableNodeSnapshotState::stable;
 }
 
+inline StableNodeSnapshotState classify_construction_node_snapshot(
+    RemotePtr pointer,
+    u64 before,
+    u64 after,
+    u32 slot_incarnation) {
+  const StableNodeSnapshotState physical = classify_physical_node_snapshot(
+    pointer, before, after, slot_incarnation);
+  if (physical != StableNodeSnapshotState::stable) return physical;
+  return (after & VamanaNode::HEADER_DELETED) != 0
+    ? StableNodeSnapshotState::terminal
+    : StableNodeSnapshotState::stable;
+}
+
 // A Stage2 source is deliberately PROVISIONAL until the continuation has
 // converged and the final graph has been published.  Its physical-identity
 // gate therefore has different lifecycle semantics from an ordinary search
@@ -79,10 +92,10 @@ inline StableNodeSnapshotState classify_stage2_target_snapshot(
   return StableNodeSnapshotState::stable;
 }
 
-// Stage2 may consume a vector directly from local storage or registered RDMA
-// scratch only when one immutable physical incarnation spans the complete
-// observation. Deleted and provisional records are not members of the stable
-// continuation graph. RETIRING/FROZEN are intentionally not rejected here:
+// Stable-certificate consumers may read a vector only when one immutable
+// physical incarnation spans the complete observation. Pending co-refinement
+// uses classify_construction_node_snapshot instead; it never confers stable
+// certificate eligibility. RETIRING/FROZEN are intentionally not rejected here:
 // the existing snapshot path also admits them for search while excluding only
 // mutation/query-invalid flags.
 inline bool stable_vector_snapshot_valid(RemotePtr pointer,
@@ -92,6 +105,27 @@ inline bool stable_vector_snapshot_valid(RemotePtr pointer,
   return classify_stable_node_snapshot(
            pointer, before, after, slot_incarnation) ==
     StableNodeSnapshotState::stable;
+}
+
+enum class CertificateLeaseChildState : u8 {
+  live,
+  terminal,
+  retryable,
+};
+
+inline CertificateLeaseChildState certificate_lease_child_state(
+    bool pointer_valid, bool snapshot_read, bool snapshot_deleted,
+    StableNodeSnapshotState identity_state, u64 identity_header) {
+  if (!pointer_valid || (snapshot_read && snapshot_deleted)) {
+    return CertificateLeaseChildState::terminal;
+  }
+  if (snapshot_read) return CertificateLeaseChildState::live;
+  if (identity_state == StableNodeSnapshotState::terminal ||
+      (identity_state == StableNodeSnapshotState::stable &&
+       (identity_header & VamanaNode::HEADER_DELETED) != 0)) {
+    return CertificateLeaseChildState::terminal;
+  }
+  return CertificateLeaseChildState::retryable;
 }
 
 }  // namespace memory_node_storage_owner_index_detail

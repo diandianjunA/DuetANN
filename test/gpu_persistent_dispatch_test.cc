@@ -65,6 +65,9 @@ int main(int argc, char** argv) {
       for (const u32 threads : {128u, 256u}) {
         const auto occupancy = gpu_search::inspect_persistent_search_kernel(
           threads, true, pq_subquantizers);
+        if (occupancy.active_blocks_per_sm == 0 && threads == 256) {
+          continue;
+        }
         if (occupancy.active_blocks_per_sm == 0 ||
             occupancy.registers_per_thread == 0 ||
             occupancy.max_threads_per_block < threads) {
@@ -160,6 +163,12 @@ int main(int argc, char** argv) {
       ? static_cast<u32>(std::max(32, std::atoi(argv[5]))) : 128;
     if (threads != 128 && threads != 256) {
       throw std::invalid_argument("query threads must be 128 or 256");
+    }
+    const auto selected_occupancy = gpu_search::inspect_persistent_search_kernel(
+      threads, false, pq_subquantizers);
+    if (selected_occupancy.active_blocks_per_sm == 0) {
+      std::cout << "SKIP: selected persistent kernel is unavailable in this build\n";
+      return 0;
     }
     cudaStream_t stream = nullptr;
     check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),

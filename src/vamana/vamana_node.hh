@@ -10,6 +10,7 @@
 #include "remote_pointer.hh"
 #include "vamana/hot_graph.hh"
 #include "vamana/dynamic_navigation_code.hh"
+#include "vamana/graph_extent_policy.hh"
 
 #if defined(__CUDACC__)
 #define DVSTOR_VAMANA_NODE_HD __host__ __device__
@@ -109,7 +110,8 @@ public:
   static constexpr u32 DYNAMIC_CODE_EXTENT_CLASS_SHIFT =
     DYNAMIC_CODE_INCARNATION_BITS;
   static constexpr u8 DYNAMIC_CODE_EXTENT_CLASS_UNKNOWN = 0x7fu;
-  static constexpr u32 GRAPH_EXTENT_EDGES_PER_CLASS = 8;
+  static constexpr u32 GRAPH_EXTENT_EDGES_PER_CLASS =
+    vamana::graph_extent::kQuantumEdges;
 
   DVSTOR_VAMANA_NODE_HD static constexpr u32 pack_dynamic_navigation_tag(
       u32 incarnation, u8 extent_class) {
@@ -132,12 +134,10 @@ public:
       u32 stable_count, u32 provisional_count) {
     const u32 total = stable_count + provisional_count;
     if (total < stable_count) return DYNAMIC_CODE_EXTENT_CLASS_UNKNOWN;
-    const u32 extent_class =
-      total / GRAPH_EXTENT_EDGES_PER_CLASS +
-        (total % GRAPH_EXTENT_EDGES_PER_CLASS != 0 ? 1u : 0u);
-    return extent_class < DYNAMIC_CODE_EXTENT_CLASS_UNKNOWN
-      ? static_cast<u8>(extent_class)
-      : DYNAMIC_CODE_EXTENT_CLASS_UNKNOWN;
+    const u8 level = vamana::graph_extent::level_for_neighbors(
+      total, std::numeric_limits<u32>::max());
+    return level < DYNAMIC_CODE_EXTENT_CLASS_UNKNOWN
+      ? level : DYNAMIC_CODE_EXTENT_CLASS_UNKNOWN;
   }
 
   static size_t align_storage(size_t value) {

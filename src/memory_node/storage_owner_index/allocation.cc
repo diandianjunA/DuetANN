@@ -1,5 +1,6 @@
 #include "memory_node/storage_owner_index/detail.hh"
 #include "memory_node/storage_owner_index/dynamic_allocation_policy.hh"
+#include "memory_node/storage_owner_maintenance/certificate_lease.hh"
 
 #include <cstring>
 #include <filesystem>
@@ -148,6 +149,9 @@ void MemoryNode::retire_local_dynamic_node(RemotePtr pointer,
     // same physical slot.
     return;
   }
+  if (storage_owner_certificate_leases_ != nullptr) {
+    (void)storage_owner_certificate_leases_->release_target(pointer.raw_address);
+  }
   u64 pending = 0;
   u64 reused = 0;
   {
@@ -189,6 +193,9 @@ void MemoryNode::retire_local_dynamic_node_ready(RemotePtr pointer) {
       VamanaNode::header_incarnation(header) != pointer.incarnation() ||
       stored_incarnation != pointer.incarnation()) {
     return;
+  }
+  if (storage_owner_certificate_leases_ != nullptr) {
+    (void)storage_owner_certificate_leases_->release_target(pointer.raw_address);
   }
   u64 pending = 0;
   u64 reused = 0;
@@ -607,6 +614,9 @@ bool MemoryNode::mark_node_deleted(RemotePtr rptr, u32 generation) {
   }
   if (locked) {
     unlock_node(rptr);
+  }
+  if (local && storage_owner_certificate_leases_ != nullptr) {
+    (void)storage_owner_certificate_leases_->release_target(rptr.raw_address);
   }
   return true;
 }

@@ -296,6 +296,36 @@ void test_score_many_query_rebase_and_exact_demux() {
   assert(outbox.finish_success(logical->lease));
 }
 
+void test_score_and_graph_planes_form_independent_aggregates() {
+  detail::Stage2HomeRpcOutbox outbox(
+    8, 4, 5, 32, 256, 256, 1u << 20);
+  const std::vector<std::uint32_t> query_index{0};
+  auto score = score_request(query_index, 1, 11000, 91);
+  auto graph = expand_request(1, 12000, 101);
+  constexpr std::uint32_t peer = 2;
+  assert(outbox.try_enqueue(dispatch(
+           51, peer, protocol::PeerRpcType::stage2_score_many_request,
+           1, score)) == detail::Stage2HomeRpcEnqueueResult::enqueued);
+  assert(outbox.try_enqueue(dispatch(
+           52, peer, protocol::PeerRpcType::stage2_expand_score_request,
+           1, graph)) == detail::Stage2HomeRpcEnqueueResult::enqueued);
+  const auto score_aggregate = outbox.form_aggregate(
+    peer, protocol::PeerRpcType::stage2_score_many_request, 9051, 0);
+  const auto graph_aggregate = outbox.form_aggregate(
+    peer, protocol::PeerRpcType::stage2_expand_score_request, 9052, 0);
+  assert(score_aggregate.has_value() && score_aggregate->logical_count == 1);
+  assert(graph_aggregate.has_value() && graph_aggregate->logical_count == 1);
+  assert(score_aggregate->wire_request_id == 9051);
+  assert(graph_aggregate->wire_request_id == 9052);
+  assert(outbox.cancel_logical(51));
+  assert(outbox.size() == 1 && outbox.aggregate_size() == 1);
+  assert(!outbox.owns_wire_request(9051));
+  assert(!outbox.discard_aggregate(9051));
+  assert(outbox.owns_wire_request(9052));
+  assert(outbox.discard_aggregate(9052));
+  assert(outbox.size() == 0 && outbox.aggregate_size() == 0);
+}
+
 void test_partition_bounds_retry_and_cancellation() {
   detail::Stage2HomeRpcOutbox outbox(
     8, 4, 5, 3, 8, 4, 1u << 20);
@@ -983,6 +1013,7 @@ int main() {
   VamanaNode::init_static_storage(128, 96, VectorDType::uint8);
   test_expand_score_exact_wire_combine_and_compact_demux();
   test_score_many_query_rebase_and_exact_demux();
+  test_score_and_graph_planes_form_independent_aggregates();
   test_partition_bounds_retry_and_cancellation();
   test_leased_partial_cancel_retries_only_live_members();
   test_singleton_direct_fast_success_uses_borrowed_registry_slot();

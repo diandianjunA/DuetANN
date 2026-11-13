@@ -2,6 +2,7 @@
 #include <atomic>
 #include <barrier>
 #include <chrono>
+#include <condition_variable>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -27,8 +28,13 @@
 #include "common/vector_dtype.hh"
 #include "nlohmann/json.hh"
 #include "service/compute_service.hh"
+#include "../experiment/contribution/c1_locality/locality_sampler.hh"
 #include "tools/breakdown_benchmark/args.hh"
 #include "tools/breakdown_benchmark/progress.hh"
+
+#ifdef DVSTOR_LONG_INSERT_WITH_FAISS_CPU
+#include <faiss/IndexFlat.h>
+#endif
 
 namespace {
 
@@ -47,8 +53,18 @@ struct Args {
   std::filesystem::path query_file;
   std::filesystem::path baseline_groundtruth_file;
   std::filesystem::path groundtruth_file;
+  std::filesystem::path base_vector_file;
+  bool dynamic_groundtruth{false};
   size_t recall_queries{10000};
   u32 recall_k{10};
+  size_t recall_sample_interval_seconds{0};
+  std::filesystem::path recall_samples_json_path;
+  std::filesystem::path locality_samples_json_path;
+  size_t locality_sample_interval_ms{0};
+  std::filesystem::path groundtruth_output_dir;
+  size_t groundtruth_precompute_step{500000};
+  bool groundtruth_precompute_only{false};
+  bool require_precomputed_groundtruth{false};
   size_t settle_seconds{300};
   size_t self_recall_queries{100};
   u32 self_recall_k{10};
@@ -89,13 +105,31 @@ struct GroundTruth {
 
 struct RecallResult {
   double recall{};
+  double base_recall{};
+  double inserted_recall{};
   size_t queries{};
   u32 k{};
+  size_t base_truth{};
+  size_t inserted_truth{};
 };
 
 struct SelfRecallSnapshot {
   RecallResult summary;
   std::vector<std::vector<node_t>> result_ids;
+  std::vector<node_t> missed_insert_ids;
+};
+
+struct TimedRecallSample {
+  size_t index{};
+  double scheduled_elapsed_seconds{};
+  double start_elapsed_seconds{};
+  double end_elapsed_seconds{};
+  size_t inserted_ack_at_start{};
+  size_t inserted_ack_at_end{};
+  size_t groundtruth_inserted_count{};
+  double groundtruth_build_seconds{};
+  bool groundtruth_reused{};
+  RecallResult recall;
 };
 
 struct InsertStats {
@@ -104,6 +138,7 @@ struct InsertStats {
   size_t failed{};
   double duration_seconds{};
   double inserts_per_second{};
+  std::vector<TimedRecallSample> recall_samples;
 };
 
 [[noreturn]] void fail(const std::string& message) {
@@ -187,6 +222,18 @@ void write_json_file(const std::filesystem::path& path, const nlohmann::json& ro
   if (!output) {
     fail("failed to write " + path.string());
   }
+}
+
+void write_groundtruth_file(
+    const std::filesystem::path& path, const GroundTruth& groundtruth) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream output(path, std::ios::binary);
+  if (!output) fail("failed to open dynamic groundtruth output");
+  output.write(reinterpret_cast<const char*>(&groundtruth.rows), sizeof(u32));
+  output.write(reinterpret_cast<const char*>(&groundtruth.top_k), sizeof(u32));
+  output.write(reinterpret_cast<const char*>(groundtruth.ids.data()),
+               groundtruth.ids.size() * sizeof(u32));
+  if (!output) fail("failed to write dynamic groundtruth");
 }
 
 VectorRows read_header_vector_rows(const std::filesystem::path& path) {
@@ -347,13 +394,24 @@ GroundTruth read_groundtruth(const std::filesystem::path& path) {
   fail("unsupported groundtruth file extension: " + path.string());
 }
 
-double recall_at_k(const std::vector<u32>& results, const u32* truth, u32 k) {
+double recall_at_k(const std::vector<u32>& results, const u32* truth, u32 k,
+                   u32 first_inserted_id,
+                   size_t* base_hits, size_t* inserted_hits,
+                   size_t* base_truth, size_t* inserted_truth) {
   u32 hits = 0;
+  *base_hits = 0;
+  *inserted_hits = 0;
+  *base_truth = 0;
+  *inserted_truth = 0;
+  for (u32 j = 0; j < k; ++j) {
+    ++(truth[j] >= first_inserted_id ? *inserted_truth : *base_truth);
+  }
   const size_t result_count = std::min<size_t>(results.size(), k);
   for (size_t i = 0; i < result_count; ++i) {
     for (u32 j = 0; j < k; ++j) {
       if (results[i] == truth[j]) {
         ++hits;
+        ++(truth[j] >= first_inserted_id ? *inserted_hits : *base_hits);
         break;
       }
     }
@@ -371,8 +429,18 @@ void usage(const char* argv0) {
       << "  --insert-threads <n>            Concurrent application threads, default 16\n"
       << "  --insert-batch-size <n>         Vectors per ComputeService::insert call, default 16\n"
       << "  --baseline-groundtruth-file <p> Optional pre-insert GT, e.g. gnd/idx_100M.ivecs\n"
+      << "  --base-vector-file <path>       Base vectors used to refresh old GT distances\n"
+      << "  --dynamic-groundtruth           Recompute exact Top-K against base GT and inserted vectors\n"
       << "  --recall-queries <n>            Queries for recall, default 10000; 0 means all\n"
       << "  --recall-k <k>                  Recall K, default 10\n"
+      << "  --recall-sample-interval-seconds <n> Sample baseline-GT recall during insertion; 0 disables\n"
+      << "  --recall-samples-json <path>    Atomic checkpoint for periodic recall samples\n"
+      << "  --locality-samples-json <path>  Atomic checkpoint for physical-locality telemetry\n"
+      << "  --locality-sample-interval-ms <n> Locality sample interval; 0 disables, default 0\n"
+      << "  --groundtruth-output-dir <path> Optional dynamic GT files for independent audit\n"
+      << "  --groundtruth-precompute-step <n> Inserted-vector interval for ahead-of-time dynamic GT, default 500000\n"
+      << "  --groundtruth-precompute-only   Generate dynamic GT without starting the storage service\n"
+      << "  --require-precomputed-groundtruth  Fail rather than recomputing a missing dynamic GT file\n"
       << "  --settle-seconds <n>            Sleep after insertion before post recall, default 300\n"
       << "  --self-recall-queries <n>       Inserted vectors sampled for self-hit, default 100; 0 disables\n"
       << "  --self-recall-k <k>             Search K for inserted-vector self-hit, default 10\n"
@@ -411,10 +479,33 @@ Args parse_args(int argc, char** argv) {
       args.baseline_groundtruth_file = require_value("--baseline-groundtruth-file");
     } else if (flag == "--groundtruth-file") {
       args.groundtruth_file = require_value("--groundtruth-file");
+    } else if (flag == "--base-vector-file") {
+      args.base_vector_file = require_value("--base-vector-file");
+    } else if (flag == "--dynamic-groundtruth") {
+      args.dynamic_groundtruth = true;
     } else if (flag == "--recall-queries") {
       args.recall_queries = std::stoull(require_value("--recall-queries"));
     } else if (flag == "--recall-k") {
       args.recall_k = static_cast<u32>(std::stoul(require_value("--recall-k")));
+    } else if (flag == "--recall-sample-interval-seconds") {
+      args.recall_sample_interval_seconds =
+        std::stoull(require_value("--recall-sample-interval-seconds"));
+    } else if (flag == "--recall-samples-json") {
+      args.recall_samples_json_path = require_value("--recall-samples-json");
+    } else if (flag == "--locality-samples-json") {
+      args.locality_samples_json_path = require_value("--locality-samples-json");
+    } else if (flag == "--locality-sample-interval-ms") {
+      args.locality_sample_interval_ms =
+        std::stoull(require_value("--locality-sample-interval-ms"));
+    } else if (flag == "--groundtruth-output-dir") {
+      args.groundtruth_output_dir = require_value("--groundtruth-output-dir");
+    } else if (flag == "--groundtruth-precompute-step") {
+      args.groundtruth_precompute_step =
+        std::stoull(require_value("--groundtruth-precompute-step"));
+    } else if (flag == "--groundtruth-precompute-only") {
+      args.groundtruth_precompute_only = true;
+    } else if (flag == "--require-precomputed-groundtruth") {
+      args.require_precomputed_groundtruth = true;
     } else if (flag == "--settle-seconds") {
       args.settle_seconds = std::stoull(require_value("--settle-seconds"));
     } else if (flag == "--self-recall-queries") {
@@ -444,6 +535,41 @@ Args parse_args(int argc, char** argv) {
     fail("--query-file is required when a groundtruth file is used");
   }
   if (args.report_json_path.empty()) fail("--report-json is required");
+  if (args.dynamic_groundtruth &&
+      (args.baseline_groundtruth_file.empty() || args.base_vector_file.empty())) {
+    fail("dynamic groundtruth requires --baseline-groundtruth-file and "
+         "--base-vector-file");
+  }
+  if (args.dynamic_groundtruth && args.groundtruth_precompute_step == 0) {
+    fail("--groundtruth-precompute-step must be > 0");
+  }
+  if ((args.groundtruth_precompute_only ||
+       args.require_precomputed_groundtruth) &&
+      (!args.dynamic_groundtruth || args.groundtruth_output_dir.empty())) {
+    fail("precomputed groundtruth requires --dynamic-groundtruth and "
+         "--groundtruth-output-dir");
+  }
+  if (args.groundtruth_precompute_only &&
+      args.require_precomputed_groundtruth) {
+    fail("--groundtruth-precompute-only cannot be combined with "
+         "--require-precomputed-groundtruth");
+  }
+#ifndef DVSTOR_LONG_INSERT_WITH_FAISS_CPU
+  if (args.dynamic_groundtruth) {
+    fail("dynamic groundtruth requires a build with FaissCPU");
+  }
+#endif
+  if (args.recall_sample_interval_seconds != 0 &&
+      (args.baseline_groundtruth_file.empty() ||
+       args.recall_samples_json_path.empty())) {
+    fail("periodic recall requires --baseline-groundtruth-file and "
+         "--recall-samples-json");
+  }
+  if ((args.locality_sample_interval_ms == 0) !=
+      args.locality_samples_json_path.empty()) {
+    fail("--locality-samples-json and --locality-sample-interval-ms must be "
+         "provided together");
+  }
   if (args.insert_threads == 0) fail("--insert-threads must be > 0");
   if (args.insert_batch_size == 0) fail("--insert-batch-size must be > 0");
   if (args.recall_k == 0) fail("--recall-k must be > 0");
@@ -459,12 +585,13 @@ RecallResult run_recall(ComputeService& service,
                         const VectorRows& queries,
                         const GroundTruth& gt,
                         size_t requested_queries,
-                        u32 requested_k) {
+                        u32 requested_k,
+                        u32 first_inserted_id) {
   if (queries.dim != service.config().dim) {
     fail("query dim mismatch: query=" + std::to_string(queries.dim) +
          " config=" + std::to_string(service.config().dim));
   }
-  if (gt.rows != queries.count) {
+  if (gt.rows > queries.count) {
     fail("query/groundtruth row count mismatch: query=" + std::to_string(queries.count) +
          " gt=" + std::to_string(gt.rows));
   }
@@ -475,9 +602,16 @@ RecallResult run_recall(ComputeService& service,
   const size_t recall_queries = requested_queries == 0
                                   ? queries.count
                                   : std::min<size_t>(requested_queries, queries.count);
+  if (gt.rows < recall_queries) {
+    fail("groundtruth has fewer rows than the recall query count");
+  }
   std::atomic<size_t> completed{0};
   ProgressReporter reporter(label, completed, recall_queries, 0);
   double total_recall = 0.0;
+  size_t total_base_hits = 0;
+  size_t total_inserted_hits = 0;
+  size_t total_base_truth = 0;
+  size_t total_inserted_truth = 0;
   for (size_t qi = 0; qi < recall_queries; ++qi) {
     const auto results = service.search_raw(queries.dtype, queries.row_payload(qi),
                                             queries.dim, requested_k);
@@ -486,7 +620,17 @@ RecallResult run_recall(ComputeService& service,
     for (const node_t id : results) {
       result_ids.push_back(static_cast<u32>(id));
     }
-    total_recall += recall_at_k(result_ids, gt.row(qi), requested_k);
+    size_t base_hits = 0;
+    size_t inserted_hits = 0;
+    size_t base_truth = 0;
+    size_t inserted_truth = 0;
+    total_recall += recall_at_k(
+      result_ids, gt.row(qi), requested_k, first_inserted_id,
+      &base_hits, &inserted_hits, &base_truth, &inserted_truth);
+    total_base_hits += base_hits;
+    total_inserted_hits += inserted_hits;
+    total_base_truth += base_truth;
+    total_inserted_truth += inserted_truth;
     completed.fetch_add(1, std::memory_order_relaxed);
   }
   reporter.finish();
@@ -495,8 +639,16 @@ RecallResult run_recall(ComputeService& service,
   result.queries = recall_queries;
   result.k = requested_k;
   result.recall = recall_queries == 0 ? 0.0 : total_recall / static_cast<double>(recall_queries);
+  result.base_truth = total_base_truth;
+  result.inserted_truth = total_inserted_truth;
+  result.base_recall = total_base_truth == 0 ? 0.0
+    : static_cast<double>(total_base_hits) / static_cast<double>(total_base_truth);
+  result.inserted_recall = total_inserted_truth == 0 ? 0.0
+    : static_cast<double>(total_inserted_hits) / static_cast<double>(total_inserted_truth);
   std::cerr << "[sift101m-long-insert][recall] " << label << " recall@" << requested_k
-            << "=" << result.recall << " queries=" << result.queries << std::endl;
+            << "=" << result.recall << " base=" << result.base_recall
+            << " inserted=" << result.inserted_recall
+            << " queries=" << result.queries << std::endl;
   return result;
 }
 
@@ -510,6 +662,7 @@ SelfRecallSnapshot run_inserted_self_recall(
   ProgressReporter reporter(label, completed, query_count, 0);
   size_t hits = 0;
   std::vector<std::vector<node_t>> captured_results;
+  std::vector<node_t> missed_insert_ids;
   captured_results.reserve(query_count);
   for (size_t sample = 0; sample < query_count; ++sample) {
     const size_t logical_row = query_count == inserted_count
@@ -521,6 +674,8 @@ SelfRecallSnapshot run_inserted_self_recall(
       insert_rows.dim, requested_k);
     if (std::find(results.begin(), results.end(), expected) != results.end()) {
       ++hits;
+    } else {
+      missed_insert_ids.push_back(expected);
     }
     captured_results.emplace_back(results.begin(), results.end());
     completed.fetch_add(1, std::memory_order_relaxed);
@@ -538,6 +693,7 @@ SelfRecallSnapshot run_inserted_self_recall(
   return SelfRecallSnapshot{
     .summary = result,
     .result_ids = std::move(captured_results),
+    .missed_insert_ids = std::move(missed_insert_ids),
   };
 }
 
@@ -563,10 +719,261 @@ double result_overlap_at_k(const SelfRecallSnapshot& first,
   return total / static_cast<double>(first.result_ids.size());
 }
 
+#ifdef DVSTOR_LONG_INSERT_WITH_FAISS_CPU
+GroundTruth build_dynamic_groundtruth(
+    const VectorRows& queries, const VectorRows& base_rows,
+    const VectorRows& insert_rows, size_t insert_row_offset,
+    uint64_t insert_start_id, size_t inserted_count,
+    const GroundTruth& base_groundtruth, size_t requested_queries, u32 k) {
+  if (requested_queries == 0) requested_queries = queries.count;
+  if (queries.dim != base_rows.dim || queries.dim != insert_rows.dim) {
+    fail("dynamic groundtruth dimension mismatch");
+  }
+  if (inserted_count == 0 || requested_queries == 0 ||
+      requested_queries > queries.count ||
+      requested_queries > base_groundtruth.rows || k == 0 ||
+      k > base_groundtruth.top_k) {
+    fail("dynamic groundtruth query/K range is invalid");
+  }
+  if (insert_row_offset + inserted_count > insert_rows.count) {
+    fail("dynamic groundtruth insert range exceeds its input");
+  }
+  if (inserted_count > std::numeric_limits<faiss::idx_t>::max()) {
+    fail("dynamic groundtruth exceeds Faiss index capacity");
+  }
+  const size_t dim = queries.dim;
+  const size_t query_components = requested_queries * dim;
+  const size_t inserted_components = inserted_count * dim;
+  if (dim != 0 && (query_components / dim != requested_queries ||
+                   inserted_components / dim != inserted_count)) {
+    fail("dynamic groundtruth matrix size overflows");
+  }
+  std::vector<float> query_values(query_components);
+  for (size_t query = 0; query < requested_queries; ++query) {
+    decode_storage_vector_to_float(
+      queries.row_payload(query), queries.dtype, dim,
+      query_values.data() + query * dim);
+  }
+  std::vector<float> inserted_values(inserted_components);
+  for (size_t row = 0; row < inserted_count; ++row) {
+    decode_storage_vector_to_float(
+      insert_rows.row_payload(insert_row_offset + row), insert_rows.dtype, dim,
+      inserted_values.data() + row * dim);
+  }
+
+  faiss::IndexFlatL2 inserted_index(dim);
+  if (inserted_count != 0) {
+    inserted_index.add(inserted_count, inserted_values.data());
+  }
+  std::vector<float> inserted_distances(requested_queries * k);
+  std::vector<faiss::idx_t> inserted_labels(requested_queries * k);
+  if (inserted_count != 0) {
+    inserted_index.search(
+      requested_queries, query_values.data(), k,
+      inserted_distances.data(), inserted_labels.data());
+  }
+
+  GroundTruth result;
+  result.rows = requested_queries;
+  result.top_k = k;
+  result.ids.resize(requested_queries * k);
+  std::vector<float> base_values(dim);
+  std::vector<std::pair<float, u32>> candidates;
+  candidates.reserve(2 * k);
+  for (size_t query = 0; query < requested_queries; ++query) {
+    candidates.clear();
+    const float* query_values_row = query_values.data() + query * dim;
+    for (u32 rank = 0; rank < k; ++rank) {
+      const u32 id = base_groundtruth.row(query)[rank];
+      if (id >= base_rows.count) {
+        fail("base groundtruth ID exceeds base vector count");
+      }
+      decode_storage_vector_to_float(
+        base_rows.row_payload(id), base_rows.dtype, dim, base_values.data());
+      float distance = 0.0f;
+      for (size_t component = 0; component < dim; ++component) {
+        const float delta = query_values_row[component] - base_values[component];
+        distance += delta * delta;
+      }
+      candidates.emplace_back(distance, id);
+    }
+    for (u32 rank = 0; rank < k; ++rank) {
+      const faiss::idx_t label = inserted_labels[query * k + rank];
+      if (label < 0 || static_cast<uint64_t>(label) >= inserted_count) {
+        fail("Faiss returned an invalid inserted-vector label");
+      }
+      candidates.emplace_back(
+        inserted_distances[query * k + rank],
+        static_cast<u32>(insert_start_id + static_cast<uint64_t>(label)));
+    }
+    std::sort(candidates.begin(), candidates.end());
+    for (u32 rank = 0; rank < k; ++rank) {
+      result.ids[query * k + rank] = candidates[rank].second;
+    }
+  }
+  return result;
+}
+#endif
+
+GroundTruth load_dynamic_groundtruth(
+    const VectorRows& queries, const VectorRows& base_rows,
+    const VectorRows& insert_rows, const GroundTruth& base_groundtruth,
+    const Args& args, size_t inserted_count,
+    const std::filesystem::path& path, bool& reused) {
+  const bool exists = std::filesystem::exists(path);
+  if (args.require_precomputed_groundtruth && !exists) {
+    fail("missing required precomputed groundtruth: " + path.string());
+  }
+  if (!args.groundtruth_output_dir.empty() && exists) {
+    reused = true;
+    return read_groundtruth(path);
+  }
+#ifdef DVSTOR_LONG_INSERT_WITH_FAISS_CPU
+  reused = false;
+  GroundTruth result = build_dynamic_groundtruth(
+    queries, base_rows, insert_rows, args.insert_row_offset,
+    args.insert_start_id, inserted_count, base_groundtruth,
+    args.recall_queries, args.recall_k);
+  if (!args.groundtruth_output_dir.empty()) {
+    write_groundtruth_file(path, result);
+  }
+  return result;
+#else
+  fail("dynamic groundtruth requires a build with FaissCPU");
+#endif
+}
+
+int run_groundtruth_precompute_only(const Args& args) {
+  std::cerr << "[sift101m-long-insert] loading insert vectors: "
+            << args.insert_file << std::endl;
+  const VectorRows insert_rows = read_vector_rows(args.insert_file);
+  std::cerr << "[sift101m-long-insert] loading queries: "
+            << args.query_file << std::endl;
+  const VectorRows queries = read_vector_rows(args.query_file);
+  std::cerr << "[sift101m-long-insert] loading base vectors: "
+            << args.base_vector_file << std::endl;
+  const VectorRows base_rows = read_vector_rows(args.base_vector_file);
+  const GroundTruth base_groundtruth =
+    read_groundtruth(args.baseline_groundtruth_file);
+  if (args.insert_row_offset > insert_rows.count) {
+    fail("--insert-row-offset exceeds insert-file row count");
+  }
+  const size_t available = insert_rows.count - args.insert_row_offset;
+  const size_t inserted_count = args.insert_count == 0
+    ? available : std::min(args.insert_count, available);
+  if (inserted_count == 0) fail("effective insert count is zero");
+  std::filesystem::create_directories(args.groundtruth_output_dir);
+
+  nlohmann::json files = nlohmann::json::array();
+  size_t sample_index = 0;
+  for (size_t checkpoint = args.groundtruth_precompute_step;
+       checkpoint <= inserted_count;
+       checkpoint += args.groundtruth_precompute_step, ++sample_index) {
+    const auto started = std::chrono::steady_clock::now();
+    const std::filesystem::path path = args.groundtruth_output_dir /
+      ("sample_" + std::to_string(sample_index) + ".bin");
+    bool reused = false;
+    const GroundTruth result = load_dynamic_groundtruth(
+      queries, base_rows, insert_rows, base_groundtruth, args, checkpoint,
+      path, reused);
+    const double elapsed = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - started).count();
+    files.push_back({
+      {"file", path.filename().string()},
+      {"inserted_count", checkpoint},
+      {"rows", result.rows},
+      {"top_k", result.top_k},
+      {"reused", reused},
+      {"seconds", elapsed},
+    });
+    std::cerr << "[sift101m-long-insert][groundtruth] sample=" << sample_index
+              << " inserted=" << checkpoint << " reused=" << reused
+              << " seconds=" << elapsed << std::endl;
+  }
+
+  const auto started = std::chrono::steady_clock::now();
+  const std::filesystem::path final_path =
+    args.groundtruth_output_dir / "post_stage2_drain.bin";
+  bool final_reused = false;
+  const GroundTruth final_result = load_dynamic_groundtruth(
+    queries, base_rows, insert_rows, base_groundtruth, args, inserted_count,
+    final_path, final_reused);
+  const double final_elapsed = std::chrono::duration<double>(
+    std::chrono::steady_clock::now() - started).count();
+  files.push_back({
+    {"file", final_path.filename().string()},
+    {"inserted_count", inserted_count},
+    {"rows", final_result.rows},
+    {"top_k", final_result.top_k},
+    {"reused", final_reused},
+    {"seconds", final_elapsed},
+  });
+  write_json_file(args.groundtruth_output_dir / "manifest.json", {
+    {"mode", "exact_base_and_inserted_topk"},
+    {"insert_file", args.insert_file.string()},
+    {"query_file", args.query_file.string()},
+    {"baseline_groundtruth_file", args.baseline_groundtruth_file.string()},
+    {"base_vector_file", args.base_vector_file.string()},
+    {"insert_start_id", args.insert_start_id},
+    {"insert_row_offset", args.insert_row_offset},
+    {"insert_count", inserted_count},
+    {"precompute_step", args.groundtruth_precompute_step},
+    {"recall_queries", args.recall_queries},
+    {"recall_k", args.recall_k},
+    {"files", files},
+  });
+  std::cerr << "[sift101m-long-insert][groundtruth] complete files="
+            << files.size() << " output_dir=" << args.groundtruth_output_dir
+            << std::endl;
+  return EXIT_SUCCESS;
+}
+
+nlohmann::json recall_samples_json(
+    const std::vector<TimedRecallSample>& samples) {
+  nlohmann::json root = nlohmann::json::array();
+  for (const TimedRecallSample& sample : samples) {
+    root.push_back({
+      {"index", sample.index},
+      {"scheduled_elapsed_seconds", sample.scheduled_elapsed_seconds},
+      {"start_elapsed_seconds", sample.start_elapsed_seconds},
+      {"end_elapsed_seconds", sample.end_elapsed_seconds},
+      {"inserted_ack_at_start", sample.inserted_ack_at_start},
+      {"inserted_ack_at_end", sample.inserted_ack_at_end},
+      {"groundtruth_inserted_count", sample.groundtruth_inserted_count},
+      {"groundtruth_build_seconds", sample.groundtruth_build_seconds},
+      {"groundtruth_reused", sample.groundtruth_reused},
+      {"recall", sample.recall.recall},
+      {"base_recall", sample.recall.base_recall},
+      {"inserted_recall", sample.recall.inserted_recall},
+      {"base_truth", sample.recall.base_truth},
+      {"inserted_truth", sample.recall.inserted_truth},
+      {"queries", sample.recall.queries},
+      {"k", sample.recall.k},
+    });
+  }
+  return root;
+}
+
+void checkpoint_recall_samples(
+    const std::filesystem::path& path,
+    const std::vector<TimedRecallSample>& samples) {
+  if (path.empty()) return;
+  std::filesystem::path temporary = path;
+  temporary += ".tmp";
+  write_json_file(temporary, {
+    {"samples", recall_samples_json(samples)},
+  });
+  std::filesystem::rename(temporary, path);
+}
+
 InsertStats run_insert_phase(ComputeService& service,
                              const VectorRows& insert_rows,
+                             const VectorRows* queries,
+                             const VectorRows* base_rows,
+                             const GroundTruth* baseline_groundtruth,
                              const Args& args,
-                             size_t effective_insert_count) {
+                             size_t effective_insert_count,
+                             std::atomic<size_t>* inserted_progress) {
   if (insert_rows.dim != service.config().dim) {
     fail("insert dim mismatch: insert=" + std::to_string(insert_rows.dim) +
          " config=" + std::to_string(service.config().dim));
@@ -577,33 +984,213 @@ InsertStats run_insert_phase(ComputeService& service,
   if (args.insert_start_id + effective_insert_count > static_cast<uint64_t>(std::numeric_limits<node_t>::max()) + 1ull) {
     fail("insert id range exceeds node_t range");
   }
+  if (args.recall_sample_interval_seconds != 0 &&
+      (queries == nullptr || baseline_groundtruth == nullptr)) {
+    fail("periodic recall has no query or baseline groundtruth input");
+  }
+  if (args.dynamic_groundtruth && base_rows == nullptr) {
+    fail("dynamic groundtruth has no base vectors");
+  }
 
   std::atomic<size_t> next_row{0};
   std::atomic<size_t> attempted{0};
-  std::atomic<size_t> inserted{0};
+  std::atomic<size_t> local_inserted{0};
+  std::atomic<size_t>& inserted = inserted_progress == nullptr
+    ? local_inserted : *inserted_progress;
+  inserted.store(0, std::memory_order_relaxed);
   std::atomic<size_t> failed{0};
   std::atomic<bool> stop{false};
+  std::atomic<bool> sampling_stop{false};
   std::exception_ptr first_error;
   std::mutex error_mutex;
   std::mutex reset_mutex;
+  std::mutex sampling_mutex;
+  std::condition_variable sampling_cv;
+  std::mutex insert_gate_mutex;
+  std::condition_variable insert_gate_cv;
+  bool pause_insert_claims = false;
+  size_t active_insert_batches = 0;
+  size_t next_recall_checkpoint = args.groundtruth_precompute_step;
+  std::vector<TimedRecallSample> recall_samples;
   std::barrier start_barrier(static_cast<std::ptrdiff_t>(args.insert_threads));
   std::vector<std::thread> threads;
   threads.reserve(args.insert_threads);
 
   ProgressReporter reporter("insert-100m-to-101m", attempted, effective_insert_count, 0);
   const auto start = std::chrono::steady_clock::now();
+  const auto record_error = [&]() {
+    {
+      std::lock_guard<std::mutex> lock(error_mutex);
+      if (!first_error) first_error = std::current_exception();
+    }
+    stop.store(true, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lock(insert_gate_mutex);
+      pause_insert_claims = false;
+    }
+    sampling_cv.notify_all();
+    insert_gate_cv.notify_all();
+  };
+
+  std::thread sampler;
+  if (args.recall_sample_interval_seconds != 0) {
+    sampler = std::thread([&]() {
+      try {
+        const auto interval = std::chrono::seconds(
+          args.recall_sample_interval_seconds);
+        auto deadline = start + interval;
+        size_t sample_index = 0;
+        for (;;) {
+          size_t checkpoint = 0;
+          std::optional<GroundTruth> dynamic_groundtruth;
+          double groundtruth_build_seconds = 0.0;
+          bool reused = false;
+          auto sample_start = std::chrono::steady_clock::now();
+          if (args.dynamic_groundtruth) {
+            {
+              std::lock_guard<std::mutex> lock(insert_gate_mutex);
+              checkpoint = next_recall_checkpoint;
+            }
+            if (checkpoint > effective_insert_count ||
+                stop.load(std::memory_order_acquire) ||
+                sampling_stop.load(std::memory_order_acquire)) {
+              break;
+            }
+            const auto groundtruth_start = std::chrono::steady_clock::now();
+            dynamic_groundtruth = load_dynamic_groundtruth(
+              *queries, *base_rows, insert_rows, *baseline_groundtruth, args,
+              checkpoint,
+              args.groundtruth_output_dir /
+                ("sample_" + std::to_string(sample_index) + ".bin"),
+              reused);
+            groundtruth_build_seconds = reused ? 0.0 :
+              std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - groundtruth_start).count();
+            std::cerr << "[sift101m-long-insert][groundtruth] sample="
+                      << sample_index << " inserted=" << checkpoint
+                      << " reused=" << reused
+                      << " build_seconds=" << groundtruth_build_seconds
+                      << std::endl;
+          } else {
+            std::unique_lock<std::mutex> lock(sampling_mutex);
+            sampling_cv.wait_until(lock, deadline, [&]() {
+              return stop.load(std::memory_order_acquire) ||
+                sampling_stop.load(std::memory_order_acquire);
+            });
+            if (stop.load(std::memory_order_acquire) ||
+                sampling_stop.load(std::memory_order_acquire)) {
+              break;
+            }
+            sample_start = std::chrono::steady_clock::now();
+          }
+          if (args.dynamic_groundtruth) {
+            {
+              std::unique_lock<std::mutex> lock(insert_gate_mutex);
+              insert_gate_cv.wait(lock, [&]() {
+                return next_row.load(std::memory_order_relaxed) >= checkpoint ||
+                  stop.load(std::memory_order_acquire) ||
+                  sampling_stop.load(std::memory_order_acquire);
+              });
+              pause_insert_claims = true;
+              insert_gate_cv.wait(lock, [&]() {
+                return active_insert_batches == 0 ||
+                  stop.load(std::memory_order_acquire);
+              });
+            }
+          }
+          if (stop.load(std::memory_order_acquire) ||
+              sampling_stop.load(std::memory_order_acquire)) {
+            {
+              std::lock_guard<std::mutex> lock(insert_gate_mutex);
+              pause_insert_claims = false;
+            }
+            insert_gate_cv.notify_all();
+            break;
+          }
+          const size_t inserted_at_start = inserted.load(
+            std::memory_order_relaxed);
+          if (args.dynamic_groundtruth &&
+              (inserted_at_start != checkpoint ||
+               attempted.load(std::memory_order_relaxed) != inserted_at_start)) {
+            fail("insert prefix does not match the precomputed groundtruth");
+          }
+          const GroundTruth* recall_groundtruth = args.dynamic_groundtruth
+            ? &*dynamic_groundtruth : baseline_groundtruth;
+          const RecallResult recall = run_recall(
+            service, "insert-sample-" + std::to_string(sample_index),
+            *queries, *recall_groundtruth, args.recall_queries, args.recall_k,
+            static_cast<u32>(args.insert_start_id));
+          const auto sample_end = std::chrono::steady_clock::now();
+          recall_samples.push_back({
+            .index = sample_index,
+            .scheduled_elapsed_seconds = std::chrono::duration<double>(
+              sample_start - start).count(),
+            .start_elapsed_seconds = std::chrono::duration<double>(
+              sample_start - start).count(),
+            .end_elapsed_seconds = std::chrono::duration<double>(
+              sample_end - start).count(),
+            .inserted_ack_at_start = inserted_at_start,
+            .inserted_ack_at_end = inserted.load(std::memory_order_relaxed),
+            .groundtruth_inserted_count = checkpoint,
+            .groundtruth_build_seconds = groundtruth_build_seconds,
+            .groundtruth_reused = reused,
+            .recall = recall,
+          });
+          checkpoint_recall_samples(
+            args.recall_samples_json_path, recall_samples);
+          if (args.dynamic_groundtruth) {
+            {
+              std::lock_guard<std::mutex> lock(insert_gate_mutex);
+              next_recall_checkpoint = checkpoint +
+                args.groundtruth_precompute_step;
+              pause_insert_claims = false;
+            }
+            insert_gate_cv.notify_all();
+          } else {
+            deadline += interval;
+          }
+          ++sample_index;
+        }
+      } catch (...) {
+        {
+          std::lock_guard<std::mutex> lock(insert_gate_mutex);
+          pause_insert_claims = false;
+        }
+        insert_gate_cv.notify_all();
+        record_error();
+      }
+    });
+  }
 
   for (size_t tid = 0; tid < args.insert_threads; ++tid) {
     threads.emplace_back([&, tid]() {
       (void)tid;
+      bool batch_active = false;
       try {
         start_barrier.arrive_and_wait();
         vec<ComputeService::InsertItem> batch;
         batch.reserve(args.insert_batch_size);
         while (!stop.load(std::memory_order_acquire)) {
-          const size_t begin = next_row.fetch_add(args.insert_batch_size, std::memory_order_relaxed);
-          if (begin >= effective_insert_count) {
-            break;
+          size_t begin = 0;
+          {
+            std::unique_lock<std::mutex> lock(insert_gate_mutex);
+            if (args.dynamic_groundtruth &&
+                next_recall_checkpoint <= effective_insert_count &&
+                next_row.load(std::memory_order_relaxed) >=
+                  next_recall_checkpoint) {
+              pause_insert_claims = true;
+              insert_gate_cv.notify_all();
+            }
+            insert_gate_cv.wait(lock, [&]() {
+              return !pause_insert_claims ||
+                stop.load(std::memory_order_acquire);
+            });
+            if (stop.load(std::memory_order_acquire)) break;
+            begin = next_row.fetch_add(
+              args.insert_batch_size, std::memory_order_relaxed);
+            if (begin >= effective_insert_count) break;
+            ++active_insert_batches;
+            batch_active = true;
           }
           const size_t end = std::min(begin + args.insert_batch_size, effective_insert_count);
           batch.clear();
@@ -627,15 +1214,20 @@ InsertStats run_insert_phase(ComputeService& service,
             std::lock_guard<std::mutex> lock(reset_mutex);
             service.reset_breakdown_state();
           }
-        }
-      } catch (...) {
-        {
-          std::lock_guard<std::mutex> lock(error_mutex);
-          if (!first_error) {
-            first_error = std::current_exception();
+          {
+            std::lock_guard<std::mutex> lock(insert_gate_mutex);
+            --active_insert_batches;
+            batch_active = false;
+            if (active_insert_batches == 0) insert_gate_cv.notify_all();
           }
         }
-        stop.store(true, std::memory_order_release);
+      } catch (...) {
+        if (batch_active) {
+          std::lock_guard<std::mutex> lock(insert_gate_mutex);
+          --active_insert_batches;
+          if (active_insert_batches == 0) insert_gate_cv.notify_all();
+        }
+        record_error();
       }
     });
   }
@@ -643,12 +1235,15 @@ InsertStats run_insert_phase(ComputeService& service,
   for (auto& thread : threads) {
     thread.join();
   }
+  const auto stop_time = std::chrono::steady_clock::now();
   reporter.finish();
+  sampling_stop.store(true, std::memory_order_release);
+  sampling_cv.notify_all();
+  if (sampler.joinable()) sampler.join();
   if (first_error) {
     std::rethrow_exception(first_error);
   }
 
-  const auto stop_time = std::chrono::steady_clock::now();
   InsertStats stats;
   stats.attempted = attempted.load(std::memory_order_relaxed);
   stats.inserted = inserted.load(std::memory_order_relaxed);
@@ -657,6 +1252,7 @@ InsertStats run_insert_phase(ComputeService& service,
   stats.inserts_per_second = stats.duration_seconds <= 0.0
                                ? 0.0
                                : static_cast<double>(stats.inserted) / stats.duration_seconds;
+  stats.recall_samples = std::move(recall_samples);
   return stats;
 }
 
@@ -682,6 +1278,10 @@ nlohmann::json recall_json(const RecallResult& result,
     {"queries", result.queries},
     {"k", result.k},
     {"recall", result.recall},
+    {"base_recall", result.base_recall},
+    {"inserted_recall", result.inserted_recall},
+    {"base_truth", result.base_truth},
+    {"inserted_truth", result.inserted_truth},
   };
 }
 
@@ -713,6 +1313,16 @@ int run_with_service(ComputeService& service, const Args& args) {
               << " dtype=" << vector_dtype_name(queries->dtype) << std::endl;
   }
 
+  std::optional<VectorRows> base_rows;
+  if (args.dynamic_groundtruth) {
+    std::cerr << "[sift101m-long-insert] loading base vectors: "
+              << args.base_vector_file << std::endl;
+    base_rows = read_vector_rows(args.base_vector_file);
+    std::cerr << "[sift101m-long-insert] base rows=" << base_rows->count
+              << " dim=" << base_rows->dim
+              << " dtype=" << vector_dtype_name(base_rows->dtype) << std::endl;
+  }
+
   if (args.insert_row_offset > insert_rows.count) {
     fail("--insert-row-offset exceeds insert-file row count");
   }
@@ -737,15 +1347,27 @@ int run_with_service(ComputeService& service, const Args& args) {
     {"query_file", args.query_file.string()},
     {"baseline_groundtruth_file", args.baseline_groundtruth_file.empty() ? "" : args.baseline_groundtruth_file.string()},
     {"post_groundtruth_file", args.groundtruth_file.string()},
+    {"base_vector_file", args.base_vector_file.string()},
+    {"groundtruth_output_dir", args.groundtruth_output_dir.string()},
+    {"groundtruth_precompute_step", args.groundtruth_precompute_step},
+    {"require_precomputed_groundtruth", args.require_precomputed_groundtruth},
+    {"groundtruth_mode", args.dynamic_groundtruth
+      ? "dynamic_exact_base_and_inserted" : "fixed_base_groundtruth"},
     {"recall_queries", args.recall_queries},
     {"recall_k", args.recall_k},
+    {"recall_sample_interval_seconds", args.recall_sample_interval_seconds},
+    {"recall_samples_json", args.recall_samples_json_path.string()},
+    {"recall_time_semantics", args.dynamic_groundtruth
+      ? "consistent_insert_prefix_after_ack" : "fixed_base_groundtruth_during_concurrent_insert"},
     {"settle_seconds", args.settle_seconds},
     {"self_recall_queries", args.self_recall_queries},
     {"self_recall_k", args.self_recall_k},
     {"reset_breakdown_every", args.reset_breakdown_every},
     {"dim", service.config().dim},
     {"max_vectors_config", service.config().max_vectors},
-    {"storage_owner_update_protocol", "centroid_home_two_stage"},
+    {"storage_owner_update_protocol",
+     service.config().synchronous_exact_updates_enabled()
+       ? "single_owner_synchronous_exact" : "centroid_home_two_stage"},
     {"storage_owner_maintenance_workers", service.config().storage_owner_maintenance_workers},
     {"fine_grained_breakdown_enabled", service.config().enable_breakdown},
     {"search", "gpu_persistent_opq_pq"},
@@ -762,12 +1384,15 @@ int run_with_service(ComputeService& service, const Args& args) {
   };
 
   std::optional<RecallResult> baseline_recall;
+  std::optional<GroundTruth> baseline_groundtruth;
   if (!args.baseline_groundtruth_file.empty()) {
     std::cerr << "[sift101m-long-insert] loading baseline groundtruth: "
               << args.baseline_groundtruth_file << std::endl;
-    const GroundTruth baseline_gt = read_groundtruth(args.baseline_groundtruth_file);
-    baseline_recall = run_recall(service, "baseline-100m", *queries, baseline_gt,
-                                 args.recall_queries, args.recall_k);
+    baseline_groundtruth = read_groundtruth(args.baseline_groundtruth_file);
+    baseline_recall = run_recall(
+      service, "baseline-100m", *queries, *baseline_groundtruth,
+      args.recall_queries, args.recall_k,
+      static_cast<u32>(args.insert_start_id));
     root["baseline_recall"] = recall_json(*baseline_recall, args.query_file,
                                           args.baseline_groundtruth_file);
     service.reset_breakdown_state();
@@ -775,8 +1400,29 @@ int run_with_service(ComputeService& service, const Args& args) {
 
   std::cerr << "[sift101m-long-insert] inserting ID range [" << args.insert_start_id
             << ", " << (args.insert_start_id + effective_insert_count) << ")" << std::endl;
-  const InsertStats insert_stats = run_insert_phase(service, insert_rows, args, effective_insert_count);
+  std::atomic<size_t> inserted_ack{0};
+  c1_locality::Sampler locality_sampler(
+    args.locality_samples_json_path,
+    std::chrono::milliseconds(args.locality_sample_interval_ms), inserted_ack,
+    service.config().storage_peers.size(), [&service]() {
+      return service.storage_maintenance_telemetry();
+    });
+  root["meta"]["locality_samples_json"] =
+    args.locality_samples_json_path.string();
+  root["meta"]["locality_sample_interval_ms"] =
+    args.locality_sample_interval_ms;
+  root["meta"]["locality_metric_scope"] =
+    "stage2_finalized_new_node_outgoing_edges";
+  locality_sampler.capture("before_insert");
+  const InsertStats insert_stats = run_insert_phase(
+    service, insert_rows, queries.has_value() ? &*queries : nullptr,
+    base_rows.has_value() ? &*base_rows : nullptr,
+    baseline_groundtruth.has_value() ? &*baseline_groundtruth : nullptr,
+    args, effective_insert_count, &inserted_ack);
+  locality_sampler.set_phase("post_insert");
   root["insert"] = insert_stats_json(insert_stats);
+  root["recall_time_series"] = recall_samples_json(
+    insert_stats.recall_samples);
   service.reset_breakdown_state();
 
   if (insert_stats.failed != 0 || insert_stats.inserted != effective_insert_count) {
@@ -838,6 +1484,31 @@ int run_with_service(ComputeService& service, const Args& args) {
   if (!maintenance_complete) {
     fail("Stage2 did not reach its durable watermark before final recall");
   }
+  if (args.locality_sample_interval_ms != 0) {
+    const auto telemetry_deadline = std::chrono::steady_clock::now() +
+      std::chrono::seconds(15);
+    for (;;) {
+      const auto snapshots = service.storage_maintenance_telemetry();
+      u64 finalized = 0;
+      bool settled = snapshots.size() == service.config().storage_peers.size();
+      for (const auto& snapshot : snapshots) {
+        if (!snapshot.has_value()) {
+          settled = false;
+          continue;
+        }
+        finalized += snapshot->stage2_finalized_live;
+        settled = settled && snapshot->remaining == 0;
+      }
+      settled = settled && finalized == effective_insert_count;
+      if (settled) break;
+      if (std::chrono::steady_clock::now() >= telemetry_deadline) {
+        fail("locality telemetry did not publish the drained graph");
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    locality_sampler.set_phase("post_stage2_drain");
+    locality_sampler.capture("post_stage2_drain");
+  }
 
   std::optional<SelfRecallSnapshot> final_self_recall;
   if (args.self_recall_queries != 0) {
@@ -849,6 +1520,7 @@ int run_with_service(ComputeService& service, const Args& args) {
       {"queries", final_self_recall->summary.queries},
       {"k", final_self_recall->summary.k},
       {"hit_rate", final_self_recall->summary.recall},
+      {"missed_insert_ids", final_self_recall->missed_insert_ids},
     };
     const double overlap = result_overlap_at_k(
       *stage1_self_recall, *final_self_recall);
@@ -862,14 +1534,37 @@ int run_with_service(ComputeService& service, const Args& args) {
   }
 
   std::optional<RecallResult> post_recall;
-  if (!args.groundtruth_file.empty()) {
-    std::cerr << "[sift101m-long-insert] loading post-insert groundtruth: "
-              << args.groundtruth_file << std::endl;
-    const GroundTruth post_gt = read_groundtruth(args.groundtruth_file);
-    post_recall = run_recall(service, "post-101m", *queries, post_gt,
-                             args.recall_queries, args.recall_k);
+  if (!args.groundtruth_file.empty() || args.dynamic_groundtruth) {
+    std::optional<GroundTruth> post_gt;
+    bool groundtruth_reused = false;
+    if (args.dynamic_groundtruth) {
+      const auto groundtruth_start = std::chrono::steady_clock::now();
+      post_gt = load_dynamic_groundtruth(
+        *queries, *base_rows, insert_rows, *baseline_groundtruth, args,
+        effective_insert_count,
+        args.groundtruth_output_dir / "post_stage2_drain.bin",
+        groundtruth_reused);
+      const double build_seconds = groundtruth_reused ? 0.0 :
+        std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - groundtruth_start).count();
+      std::cerr << "[sift101m-long-insert][groundtruth] post-drain inserted="
+                << effective_insert_count << " reused=" << groundtruth_reused
+                << " build_seconds=" << build_seconds << std::endl;
+    } else {
+      std::cerr << "[sift101m-long-insert] loading post-insert groundtruth: "
+                << args.groundtruth_file << std::endl;
+      post_gt = read_groundtruth(args.groundtruth_file);
+    }
+    post_recall = run_recall(service, "post-101m", *queries, *post_gt,
+                             args.recall_queries, args.recall_k,
+                             static_cast<u32>(args.insert_start_id));
     root["post_insert_recall"] = recall_json(
       *post_recall, args.query_file, args.groundtruth_file);
+    root["post_insert_recall"]["groundtruth_mode"] = args.dynamic_groundtruth
+      ? "dynamic_exact_base_and_inserted" : "fixed_groundtruth_file";
+    root["post_insert_recall"]["groundtruth_inserted_count"] =
+      effective_insert_count;
+    root["post_insert_recall"]["groundtruth_reused"] = groundtruth_reused;
   }
 
   if (baseline_recall.has_value() && post_recall.has_value()) {
@@ -889,6 +1584,10 @@ int run_with_service(ComputeService& service, const Args& args) {
   if (baseline_recall.has_value()) {
     text << "  baseline recall@" << baseline_recall->k << ": "
          << baseline_recall->recall << " (" << baseline_recall->queries << " queries)\n";
+  }
+  if (!insert_stats.recall_samples.empty()) {
+    text << "  periodic recall samples: " << insert_stats.recall_samples.size()
+         << '\n';
   }
   if (stage1_self_recall.has_value() && final_self_recall.has_value()) {
     text << "  stage1-only self-hit@" << stage1_self_recall->summary.k << ": "
@@ -910,6 +1609,23 @@ int run_with_service(ComputeService& service, const Args& args) {
          << (baseline_recall->recall - post_recall->recall) << '\n';
   }
 
+  const auto gpu_telemetry = service.gpu_search_telemetry();
+  root["gpu_search_telemetry"] = {
+    {"dynamic_code_candidates", gpu_telemetry.dynamic_code_candidates},
+    {"dynamic_code_reads", gpu_telemetry.dynamic_code_reads},
+    {"dynamic_code_incarnation_rejects",
+      gpu_telemetry.dynamic_code_incarnation_rejects},
+    {"exact_vector_reads", gpu_telemetry.exact_vector_reads},
+  };
+  std::cerr << "[sift101m-long-insert][gpu-telemetry] dynamic_candidates="
+            << gpu_telemetry.dynamic_code_candidates
+            << " dynamic_reads=" << gpu_telemetry.dynamic_code_reads
+            << " incarnation_rejects="
+            << gpu_telemetry.dynamic_code_incarnation_rejects
+            << " exact_reads=" << gpu_telemetry.exact_vector_reads << std::endl;
+
+  locality_sampler.stop();
+  root["locality_sampling"] = locality_sampler.status();
   write_json_file(args.report_json_path, root);
   write_text_file(args.report_text_path, text.str());
   std::cout << text.str();
@@ -924,6 +1640,9 @@ int main(int argc, char** argv) {
 
   try {
     const Args args = parse_args(argc, argv);
+    if (args.groundtruth_precompute_only) {
+      return run_groundtruth_precompute_only(args);
+    }
     auto service_args = tools::breakdown_benchmark::build_service_argv(args.service_config_path);
     auto service_argv = tools::breakdown_benchmark::make_argv(service_args);
     configuration::IndexConfiguration config(static_cast<int>(service_argv.size()), service_argv.data());

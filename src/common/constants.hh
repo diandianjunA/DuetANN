@@ -4,6 +4,10 @@
 
 #include <library/types.hh>
 
+#ifndef DVSTOR_GRAPH_EXTENT_QUANTUM_EDGES
+#define DVSTOR_GRAPH_EXTENT_QUANTUM_EDGES 8
+#endif
+
 inline constexpr size_t kCacheLineBytes = 64;
 // Storage peer QPs are a bounded connection pool. QP0 carries ordered control
 // RPCs; the remainder are independent one-sided data lanes. Keep a generous

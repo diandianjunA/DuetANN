@@ -18,17 +18,49 @@ namespace memory_node_storage_owner_maintenance_detail {
 // Registered RDMA scratch remains lane-owned, but the logical beam, pending
 // home RPCs, and retry state must survive releasing that lane while the task is
 // waiting on a dependency that does not reference the scratch buffers.
-enum class Stage2SearchIoPhase : std::uint8_t {
+enum class Stage2ScoreIoPhase : std::uint8_t {
   idle,
-  score_body_ready,
-  score_body_pending,
-  score_header_ready,
-  score_header_pending,
-  graph_ready,
-  graph_pending,
-  score_home_pending,
-  graph_home_pending,
+  body_ready,
+  body_pending,
+  header_ready,
+  header_pending,
+  home_pending,
 };
+
+enum class Stage2GraphIoPhase : std::uint8_t {
+  idle,
+  home_pending,
+};
+
+struct Stage2SplitPlaneSchedule {
+  bool dispatch_graph{};
+  bool dispatch_score{};
+};
+
+constexpr Stage2SplitPlaneSchedule stage2_split_plane_schedule(
+    bool score_ready, bool graph_ready,
+    Stage2ScoreIoPhase score_phase, Stage2GraphIoPhase graph_phase,
+    std::uint8_t attempted_mask = 0, bool split_plane = true,
+    bool prefer_graph = false) {
+  const bool score_available = score_ready &&
+    score_phase == Stage2ScoreIoPhase::idle && (attempted_mask & 1u) == 0;
+  const bool graph_available = graph_ready &&
+    graph_phase == Stage2GraphIoPhase::idle && (attempted_mask & 2u) == 0;
+  if (!split_plane) {
+    const bool choose_graph = graph_available &&
+      (!score_available || prefer_graph);
+    return {
+      .dispatch_graph = choose_graph &&
+        score_phase == Stage2ScoreIoPhase::idle,
+      .dispatch_score = score_available && !choose_graph &&
+        graph_phase == Stage2GraphIoPhase::idle,
+    };
+  }
+  return {
+    .dispatch_graph = graph_available,
+    .dispatch_score = score_available,
+  };
+}
 
 enum class Stage2SearchAdvanceResult : std::uint8_t {
   waiting_rdma,
@@ -47,13 +79,6 @@ struct Stage2PendingVectorRead {
   u32 attempt{};
 };
 
-struct Stage2PendingGraphRead {
-  std::size_t unique_index{};
-  RemotePtr pointer;
-  byte_t* buffer{};
-  u32 attempt{};
-};
-
 struct Stage2ScoreConsumer {
   std::size_t search_index{};
   u64 generation{};
@@ -65,11 +90,6 @@ struct Stage2GraphConsumer {
   u64 generation{};
   RemotePtr pointer;
   bool speculative{};
-};
-
-struct Stage2GraphRetryState {
-  RemotePtr pointer;
-  u32 attempt{};
 };
 
 struct Stage2HomeExpandRpc {
@@ -211,7 +231,8 @@ constexpr bool stage2_score_many_peer_eligible(
 
 struct Stage2SearchIoState {
   bool initialized{};
-  Stage2SearchIoPhase phase{Stage2SearchIoPhase::idle};
+  Stage2ScoreIoPhase score_phase{Stage2ScoreIoPhase::idle};
+  Stage2GraphIoPhase graph_phase{Stage2GraphIoPhase::idle};
   bool ordered_snapshot_pairs{};
   bool score_many_dispatch{};
   bool prefer_graph{};
@@ -248,12 +269,13 @@ struct Stage2SearchIoState {
   vec<std::size_t> graph_order;
   vec<std::size_t> graph_group_offsets;
   vec<RemotePtr> graph_unique;
-  vec<Stage2PendingGraphRead> pending_graph;
   vec<vec<RemotePtr>> graph_neighbors;
-  vec<Stage2GraphRetryState> graph_retry_state;
   vec<Stage2HomeExpandRpc> home_expand_rpcs;
   std::size_t home_expand_rpc_count{};
   vec<vec<Stage2PrefetchedGraphExpansion>> graph_prefetch_cache;
+  u64 score_home_wait_started_ns{};
+  u64 graph_home_wait_started_ns{};
+  bool dual_plane_wait_recorded{};
 
   [[nodiscard]] bool graph_prefetch_contains(
       std::size_t search_index, RemotePtr pointer) const {
@@ -306,9 +328,39 @@ struct Stage2SearchIoState {
     return count;
   }
 
+  void clear_score_dispatch() {
+    score_consumers.clear();
+    score_order.clear();
+    score_group_offsets.clear();
+    score_unique.clear();
+    pending_vectors.clear();
+    score_home_rpc_count = 0;
+    ordered_snapshot_pairs = false;
+    score_many_dispatch = false;
+    score_phase = Stage2ScoreIoPhase::idle;
+    score_home_wait_started_ns = 0;
+    dual_plane_wait_recorded = false;
+  }
+
+  void clear_graph_dispatch() {
+    graph_consumers.clear();
+    graph_order.clear();
+    graph_group_offsets.clear();
+    graph_unique.clear();
+    for (vec<RemotePtr>& neighbors : graph_neighbors) neighbors.clear();
+    home_expand_rpc_count = 0;
+    graph_phase = Stage2GraphIoPhase::idle;
+    graph_home_wait_started_ns = 0;
+    dual_plane_wait_recorded = false;
+  }
+
   void reset() {
     initialized = false;
-    phase = Stage2SearchIoPhase::idle;
+    score_phase = Stage2ScoreIoPhase::idle;
+    graph_phase = Stage2GraphIoPhase::idle;
+    score_home_wait_started_ns = 0;
+    graph_home_wait_started_ns = 0;
+    dual_plane_wait_recorded = false;
     ordered_snapshot_pairs = false;
     score_many_dispatch = false;
     prefer_graph = false;
@@ -334,9 +386,7 @@ struct Stage2SearchIoState {
     graph_order.clear();
     graph_group_offsets.clear();
     graph_unique.clear();
-    pending_graph.clear();
     for (vec<RemotePtr>& neighbors : graph_neighbors) neighbors.clear();
-    graph_retry_state.clear();
     for (auto& cache : graph_prefetch_cache) cache.clear();
     home_expand_rpc_count = 0;
     for (auto& rpc : home_expand_rpcs) {
@@ -377,14 +427,12 @@ struct Stage2SearchIoState {
     trim(graph_order);
     trim(graph_group_offsets);
     trim(graph_unique);
-    trim(pending_graph);
     for (auto& neighbors : graph_neighbors) trim(neighbors);
     trim(graph_neighbors);
     // At most one request buffer per peer is retained. Its capacity is
     // bounded by storage_owner_batch_max * (metadata + vector bytes), and
     // retaining it avoids an allocator round trip for every graph wave.
     trim(home_expand_rpcs);
-    trim(graph_retry_state);
     for (auto& cache : graph_prefetch_cache) {
       for (auto& entry : cache) trim(entry.neighbors);
       trim(cache);
@@ -393,19 +441,25 @@ struct Stage2SearchIoState {
   }
 
   [[nodiscard]] bool idle() const {
-    return phase == Stage2SearchIoPhase::idle && !initialized;
+    return score_phase == Stage2ScoreIoPhase::idle &&
+      graph_phase == Stage2GraphIoPhase::idle && !initialized;
   }
 
   // A lane may be rebound only when no live object in this state points into
-  // its registered scratch. Home-executed graph expansion owns request and
-  // response payloads independently, so waiting for those RPCs does not pin
+  // its registered scratch. Home-executed scoring and graph expansion own
+  // request and response payloads independently, so their RPCs do not pin
   // the RDMA lane. This increases latency-hiding concurrency without adding a
   // search budget or acknowledging a task before durable completion.
   [[nodiscard]] bool scratch_rebindable() const {
-    return idle() ||
-      ((phase == Stage2SearchIoPhase::graph_home_pending ||
-        phase == Stage2SearchIoPhase::score_home_pending) &&
-       pending_vectors.empty() && pending_graph.empty());
+    const bool score_home =
+      score_phase == Stage2ScoreIoPhase::home_pending;
+    const bool graph_home =
+      graph_phase == Stage2GraphIoPhase::home_pending;
+    const bool home_or_idle =
+      (score_home || score_phase == Stage2ScoreIoPhase::idle) &&
+      (graph_home || graph_phase == Stage2GraphIoPhase::idle);
+    return idle() || (initialized && (score_home || graph_home) &&
+      home_or_idle && pending_vectors.empty());
   }
 };
 

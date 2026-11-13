@@ -215,6 +215,24 @@ nlohmann::json telemetry_to_json(
       telemetry.graph_extent_underhint_reads},
     {"graph_extent_hint_promotions",
       telemetry.graph_extent_hint_promotions},
+    {"graph_full_record_avoidance_hits",
+      telemetry.graph_full_record_avoidance_hits},
+    {"graph_full_record_avoidance_misses",
+      telemetry.graph_full_record_avoidance_misses},
+    {"graph_full_record_avoidance_ratio",
+      telemetry.graph_full_record_avoidance_hits +
+          telemetry.graph_full_record_avoidance_misses == 0
+        ? 0.0
+        : static_cast<double>(telemetry.graph_full_record_avoidance_hits) /
+          static_cast<double>(telemetry.graph_full_record_avoidance_hits +
+                              telemetry.graph_full_record_avoidance_misses)},
+    {"graph_full_record_avoidance_metric",
+      "logical_reads_avoiding_full_record / logical_graph_reads"},
+    {"graph_full_record_avoidance_metric_applicable",
+      telemetry.graph_full_record_avoidance_hits +
+        telemetry.graph_full_record_avoidance_misses != 0},
+    {"graph_full_record_avoidance_transport_semantics",
+      "validated_short_rdma"},
     {"expanded_parent_count", telemetry.expanded_parent_count},
     {"expanded_neighbor_count_sum",
       telemetry.expanded_neighbor_count_sum},
@@ -832,6 +850,17 @@ FormattedReport format_report(const nlohmann::json& root,
                << ordered.value("wasted", 0ULL)
                << " promotion_ratio="
                << ordered.value("promotion_ratio", 0.0) << '\n';
+      }
+      if (stage2.contains("split_plane")) {
+        const auto& plane = stage2["split_plane"];
+        output << "  split-plane wait_us score/graph: "
+               << plane.value("avg_score_home_wait_us", 0.0) << "/"
+               << plane.value("avg_graph_home_wait_us", 0.0)
+               << " dispatch_waves score/graph/dual/dual_waits="
+               << plane.value("score_home_dispatches", 0ULL) << "/"
+               << plane.value("graph_home_dispatches", 0ULL) << "/"
+               << plane.value("dual_plane_dispatches", 0ULL) << "/"
+               << plane.value("dual_plane_waits", 0ULL) << '\n';
       }
       if (stage2.contains("home_rpc_wire")) {
         const auto& wire = stage2["home_rpc_wire"];

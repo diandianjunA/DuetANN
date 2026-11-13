@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <stdexcept>
 
 #include "memory_node/peer_rpc/detail.hh"
@@ -519,9 +520,24 @@ bool MemoryNode::send_reconcile_reverse_fanout_and_wait(
   // Drive every chunk in round-robin order. Completed responses retain an
   // RDMA receive slot until copied, so waiting on one request in list order
   // could otherwise let out-of-order responses exhaust a peer's receive WQ.
+  auto last_debug = std::chrono::steady_clock::now();
   while (remaining != 0 &&
          !peer_reverse_shutdown_.load(std::memory_order_acquire)) {
     bool made_progress = false;
+    const auto debug_now = std::chrono::steady_clock::now();
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+        debug_now - last_debug >= std::chrono::seconds(5)) {
+      last_debug = debug_now;
+      for (const PendingResponse& response : pending) {
+        if (response.complete) continue;
+        std::cerr << "[reconcile-wait-debug] self=" << storage_id_
+                  << " target=" << response.target_shard
+                  << " request_id=" << response.request_id
+                  << " item_count=" << response.item_count
+                  << " attempts=" << response.attempts_started
+                  << " posted=" << response.posted << std::endl;
+      }
+    }
     for (PendingResponse& response : pending) {
       if (response.complete) continue;
       auto now = std::chrono::steady_clock::now();
@@ -605,9 +621,12 @@ bool MemoryNode::send_reconcile_reverse_fanout_and_wait(
           valid = observed.accepted <= 1 && observed.replaced <= 1 &&
             observed.removed <= 1 && observed.stale <= 1 &&
             observed.reserved == 0 &&
-            memory_node_storage_owner_index_detail::
-              reconcile_reverse_postcondition_holds(
-                response.expected_ops[index], observed);
+            (memory_node_storage_owner_index_detail::
+               reconcile_reverse_postcondition_holds(
+                 response.expected_ops[index], observed) ||
+             memory_node_storage_owner_index_detail::
+               reconcile_reverse_refinement_retryable(
+                 response.expected_ops[index], observed));
           if (!valid) break;
         }
         if (valid) {
@@ -1122,12 +1141,28 @@ bool MemoryNode::execute_remote_stage1_fanout_and_wait(
   // cannot delay another home's Execute ACK or authority commit. Per-phase
   // retries keep the same request ID and semantic item tokens.
   size_t remaining = pending.size();
+  auto last_debug = std::chrono::steady_clock::now();
   try {
     while (remaining != 0 &&
            !peer_reverse_shutdown_.load(std::memory_order_acquire) &&
            !storage_insert_shutdown_.load(std::memory_order_acquire)) {
       bool made_progress = false;
       const auto now = std::chrono::steady_clock::now();
+      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+          now - last_debug >= std::chrono::seconds(5)) {
+        last_debug = now;
+        for (const PendingStage1& request : pending) {
+          if (request.resolved) continue;
+          std::cerr << "[stage1-wait-debug] self=" << storage_id_
+                    << " home=" << request.home
+                    << " request_id=" << request.request_id
+                    << " item_count=" << request.item_count
+                    << " execute_resolved=" << request.execute_resolved
+                    << " posted=" << request.posted
+                    << " releases=" << request.release_items.size()
+                    << " retries=" << request.retry_indices.size() << std::endl;
+        }
+      }
       for (PendingStage1& request : pending) {
         if (request.resolved) continue;
 
@@ -1584,6 +1619,28 @@ bool MemoryNode::control_stage1_fanout_and_wait(
         "malformed token-fenced Stage1 control response");
     }
     if (disposition == Stage1ControlResponseDisposition::retry) {
+      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        static std::mutex debug_mutex;
+        static std::unordered_map<u64, std::chrono::steady_clock::time_point>
+          last_logs;
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(debug_mutex);
+        for (size_t index = 0; index < request.items.size(); ++index) {
+          const auto& item = request.items[index];
+          auto& last = last_logs[item.token.client_batch_id];
+          if (now - last < std::chrono::seconds(5)) continue;
+          last = now;
+          std::cerr << "[stage1-control-retry] self=" << storage_id_
+                    << " home=" << request.home
+                    << " release=" << request.release
+                    << " id=" << item.id
+                    << " operation_id=" << item.token.client_batch_id
+                    << " action=" << item.action
+                    << " generation=" << item.generation
+                    << " status=" << (index < outputs.size()
+                      ? outputs[index].status : 255) << std::endl;
+        }
+      }
       request.progress.mark_retry();
       request.retry_backoff.schedule(std::chrono::steady_clock::now());
       return false;

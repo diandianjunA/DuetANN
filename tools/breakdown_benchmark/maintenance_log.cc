@@ -936,6 +936,13 @@ MaintenanceLogSummary summarize_maintenance_logs(
   return summarize_impl(cursors, nullptr, observation_period_seconds);
 }
 
+MaintenanceLogSummary summarize_current_maintenance_logs(
+    const std::vector<std::string>& paths) {
+  auto cursors = snapshot_maintenance_logs(paths);
+  for (auto& cursor : cursors) cursor.offset = 0;
+  return summarize_maintenance_logs(cursors);
+}
+
 MaintenanceLogSummary summarize_maintenance_log_window(
     const std::vector<MaintenanceLogCursor>& begin_cursors,
     const std::vector<MaintenanceLogCursor>& end_cursors,
@@ -1311,6 +1318,40 @@ MaintenanceLogSummary summarize_maintenance_snapshot_window(
       summary.stage2_home_rpc_batches += home_rpc_batches;
       summary.stage2_home_rpc_items += home_rpc_items;
       summary.stage2_home_scored_neighbors += home_scored_neighbors;
+    }
+
+    uint64_t score_wait_ns = 0;
+    uint64_t graph_wait_ns = 0;
+    uint64_t score_dispatches = 0;
+    uint64_t graph_dispatches = 0;
+    uint64_t dual_dispatches = 0;
+    uint64_t dual_waits = 0;
+    if (counter_delta(first.stage2_score_home_wait_ns,
+                      latest.stage2_score_home_wait_ns, &score_wait_ns)) {
+      summary.stage2_score_home_wait_ns += score_wait_ns;
+    }
+    if (counter_delta(first.stage2_graph_home_wait_ns,
+                      latest.stage2_graph_home_wait_ns, &graph_wait_ns)) {
+      summary.stage2_graph_home_wait_ns += graph_wait_ns;
+    }
+    if (counter_delta(first.stage2_score_home_dispatches,
+                      latest.stage2_score_home_dispatches,
+                      &score_dispatches)) {
+      summary.stage2_score_home_dispatches += score_dispatches;
+    }
+    if (counter_delta(first.stage2_graph_home_dispatches,
+                      latest.stage2_graph_home_dispatches,
+                      &graph_dispatches)) {
+      summary.stage2_graph_home_dispatches += graph_dispatches;
+    }
+    if (counter_delta(first.stage2_dual_plane_dispatches,
+                      latest.stage2_dual_plane_dispatches,
+                      &dual_dispatches)) {
+      summary.stage2_dual_plane_dispatches += dual_dispatches;
+    }
+    if (counter_delta(first.stage2_dual_plane_waits,
+                      latest.stage2_dual_plane_waits, &dual_waits)) {
+      summary.stage2_dual_plane_waits += dual_waits;
     }
 
     std::array<uint64_t, kStage2TimingPhaseCount> phase_attempts{};

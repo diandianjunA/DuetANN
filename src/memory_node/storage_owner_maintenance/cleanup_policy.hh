@@ -97,23 +97,101 @@ inline vec<RemotePtr> stage2_revalidation_parents(
   return parents;
 }
 
-// Final Stage2 parents must be durable members of the already-published graph,
-// not merely readable records.  In particular, excluding an unaccounted
-// destination prevents a wave of concurrent Stage2 insertions from using only
-// one another as parents and forming a disconnected dependency cycle.
+// A mandatory Stage2 reachability parent must already belong to the published
+// graph. Pending nodes may improve the outgoing candidate set, but cannot be
+// the sole certificate: every insertion retains an independent published path.
 inline bool stage2_parent_is_stable(const u64 header, const bool deleted) {
   return !deleted &&
     VamanaNode::stable_graph_mutation_allowed(header) &&
     (header & VamanaNode::HEADER_CENTROID_ACCOUNTED) != 0;
 }
 
-// Produces the ordered Stage2 backlink plan without retaining any long-lived
-// protected edge. Ordinary stable work and promotion share one audited install
-// barrier; obsolete provisional removal remains the second barrier. Prefer
-// promoting a Stage1 parent that survived final prune;
-// otherwise establish the mandatory stable bridge at the first final parent
-// while an existing Stage1 bridge remains query-visible. Input order is
-// preserved, making the choice deterministic for an identical final beam.
+inline bool stage2_promotion_certificate_matches(
+    bool lease_merge, bool stable_edge_present, bool lease_present) {
+  return stable_edge_present && (!lease_merge || lease_present);
+}
+
+inline bool stage2_retired_target_cleanup_allowed(u64 header) {
+  return (header & (VamanaNode::HEADER_DELETED |
+                    VamanaNode::HEADER_RETIRING)) != 0 &&
+    (header & (VamanaNode::HEADER_PROVISIONAL |
+               VamanaNode::HEADER_STAGE2_FROZEN)) == 0;
+}
+
+inline bool certificate_release_can_bypass_target_lock(u64 header) {
+  return (header & (VamanaNode::HEADER_PROVISIONAL |
+                    VamanaNode::HEADER_RETIRING |
+                    VamanaNode::HEADER_DELETED)) != 0;
+}
+
+inline vec<RemotePtr> stage2_certificate_parent_candidates(
+    span<const RemotePtr> stage1_bridges,
+    span<const RemotePtr> final_targets,
+    RemotePtr current,
+    span<const RemotePtr> recovery_targets = {}) {
+  vec<RemotePtr> candidates;
+  candidates.reserve(stage1_bridges.size() + final_targets.size() +
+                     recovery_targets.size() + 1);
+  hashset_t<RemotePtr> seen;
+  const auto append = [&](RemotePtr candidate) {
+    if (!candidate.is_null() && seen.insert(candidate).second) {
+      candidates.push_back(candidate);
+    }
+  };
+  append(current);
+  for (const RemotePtr candidate : final_targets) append(candidate);
+  for (const RemotePtr candidate : stage1_bridges) append(candidate);
+  for (const RemotePtr candidate : recovery_targets) append(candidate);
+  return candidates;
+}
+
+inline void stage2_replace_certificate_parent(
+    RemotePtr replacement, RemotePtr& current, vec<RemotePtr>& replaced) {
+  if (replacement.is_null() || replacement == current) return;
+  if (!current.is_null() &&
+      std::find(replaced.begin(), replaced.end(), current) == replaced.end()) {
+    replaced.push_back(current);
+  }
+  replaced.erase(std::remove(replaced.begin(), replaced.end(), replacement),
+                 replaced.end());
+  current = replacement;
+}
+
+inline void stage2_record_certificate_parent_attempt(
+    RemotePtr attempted, vec<RemotePtr>& replaced) {
+  if (!attempted.is_null() &&
+      std::find(replaced.begin(), replaced.end(), attempted) == replaced.end()) {
+    replaced.push_back(attempted);
+  }
+}
+
+inline bool stage2_stale_certificate_release_required(
+    bool promotion_committed, RemotePtr current,
+    span<const RemotePtr> replaced) {
+  return promotion_committed || !current.is_null() || !replaced.empty();
+}
+
+inline vec<RemotePtr> stage2_certificate_release_parents(
+    RemotePtr current, span<const RemotePtr> replaced) {
+  vec<RemotePtr> parents;
+  parents.reserve(replaced.size() + 1);
+  const auto append = [&](RemotePtr parent) {
+    if (!parent.is_null() &&
+        std::find(parents.begin(), parents.end(), parent) == parents.end()) {
+      parents.push_back(parent);
+    }
+  };
+  for (const RemotePtr parent : replaced) append(parent);
+  append(current);
+  return parents;
+}
+
+// Produces one mandatory stable parent and ordinary final backlinks. Ordinary
+// stable work and certificate acquisition share the audited install barrier;
+// LeaseMerge removes provisional protection and releases the certificate only
+// after placement and centroid publication. The legacy promotion path may
+// combine provisional cleanup with install. Input order is preserved, making
+// the choice deterministic for an identical final beam.
 inline Stage2BacklinkPlan plan_stage2_backlink_reconciliation(
     span<const RemotePtr> stage1_bridges,
     span<const RemotePtr> final_targets,
@@ -135,31 +213,26 @@ inline Stage2BacklinkPlan plan_stage2_backlink_reconciliation(
     }
   }
   // A previously ACKed stable certificate is the strongest retry anchor.
-  // Otherwise consume a surviving Stage1 protected edge before considering a
-  // newly discovered final parent.  This both handles an empty final set and
-  // prevents small batches of fresh nodes from depending only on one another.
+  // Otherwise use the first globally pruned candidate, matching synchronous
+  // insertion. A Stage1 bridge is only a fallback when global pruning left no
+  // final parent, and it is consumed only when it is actually selected.
   if (!acknowledged_certificate.is_null()) {
     plan.promotion_target = acknowledged_certificate;
     plan.promotion_consumes_stage1_bridge =
       stage1_set.contains(acknowledged_certificate);
   } else {
-    for (const RemotePtr target : unique_final) {
-      if (stage1_set.contains(target)) {
-        plan.promotion_target = target;
-        plan.promotion_consumes_stage1_bridge = true;
-        break;
-      }
+    if (!unique_final.empty()) {
+      plan.promotion_target = unique_final.front();
+      plan.promotion_consumes_stage1_bridge =
+        stage1_set.contains(plan.promotion_target);
     }
-    if (plan.promotion_target.is_null() && !stage1_bridges.empty()) {
+    if (plan.promotion_target.is_null()) {
       for (const RemotePtr target : stage1_bridges) {
         if (target.is_null()) continue;
         plan.promotion_target = target;
         plan.promotion_consumes_stage1_bridge = true;
         break;
       }
-    }
-    if (plan.promotion_target.is_null() && !unique_final.empty()) {
-      plan.promotion_target = unique_final.front();
     }
   }
 
@@ -293,10 +366,10 @@ inline bool stale_stage2_owns_source_retirement(
     !destination.is_null() && source != destination;
 }
 
-// Stage2 starts from the globally pruned outgoing set, then preserves only
-// neighbors that appeared after stage1 published its temporary adjacency.
-// Those later neighbors are acknowledged concurrent reverse-edge additions;
-// dropping them at final commit would lose already completed graph work.
+// Forms a candidate union while retaining only neighbors that appeared after
+// Stage1 published its temporary adjacency. With an empty global set this
+// returns the independent operations to replay after the initial global prune;
+// dropping those additions would lose acknowledged concurrent graph work.
 inline vec<RemotePtr> merge_stage2_rebase_candidates(
     span<const RemotePtr> globally_pruned,
     span<const RemotePtr> stage1_neighbors,
@@ -323,6 +396,29 @@ inline vec<RemotePtr> merge_stage2_rebase_candidates(
     rebased.push_back(neighbor);
   }
   return rebased;
+}
+
+inline vec<RemotePtr> select_stage2_rebase_additions(
+    span<const RemotePtr> global_candidates,
+    span<const RemotePtr> stage1_neighbors,
+    span<const RemotePtr> observed_neighbors) {
+  hashset_t<RemotePtr> excluded;
+  excluded.reserve(global_candidates.size() + stage1_neighbors.size());
+  for (const RemotePtr neighbor : global_candidates) {
+    if (!neighbor.is_null()) excluded.insert(neighbor);
+  }
+  for (const RemotePtr neighbor : stage1_neighbors) {
+    if (!neighbor.is_null()) excluded.insert(neighbor);
+  }
+  vec<RemotePtr> additions;
+  hashset_t<RemotePtr> seen;
+  for (const RemotePtr neighbor : observed_neighbors) {
+    if (!neighbor.is_null() && !excluded.contains(neighbor) &&
+        seen.insert(neighbor).second) {
+      additions.push_back(neighbor);
+    }
+  }
+  return additions;
 }
 
 }  // namespace memory_node_storage_owner_maintenance_detail

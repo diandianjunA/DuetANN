@@ -2,6 +2,7 @@
 
 #include "gpu_search/persistent_kernel.hh"
 #include "gpu_search/persistent_kernel/warp_bitonic_sort.cuh"
+#include "gpu_search/persistent_kernel/warp_reduction.cuh"
 
 #include <cuda_runtime.h>
 #include <cub/block/block_radix_sort.cuh>

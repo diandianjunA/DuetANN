@@ -16,7 +16,8 @@ using memory_node_storage_owner_maintenance_detail::
   stage2_score_many_min_items;
 using memory_node_storage_owner_maintenance_detail::
   stage2_score_many_peer_eligible;
-using memory_node_storage_owner_maintenance_detail::Stage2SearchIoPhase;
+using memory_node_storage_owner_maintenance_detail::Stage2ScoreIoPhase;
+using memory_node_storage_owner_maintenance_detail::Stage2GraphIoPhase;
 using memory_node_storage_owner_maintenance_detail::Stage2SearchIoState;
 using memory_node_storage_owner_maintenance_detail::
   Stage2PrefetchedGraphExpansion;
@@ -24,6 +25,8 @@ using memory_node_storage_owner_maintenance_detail::
   stage2_consumer_fits_physical_scratch;
 using memory_node_storage_owner_maintenance_detail::
   stage2_ordered_issue_width;
+using memory_node_storage_owner_maintenance_detail::
+  stage2_split_plane_schedule;
 
 namespace {
 
@@ -183,19 +186,96 @@ void test_home_rpc_wait_does_not_pin_registered_rdma_scratch() {
   assert(state.scratch_rebindable());
 
   state.initialized = true;
-  state.phase = Stage2SearchIoPhase::graph_home_pending;
+  state.graph_phase = Stage2GraphIoPhase::home_pending;
+  assert(state.scratch_rebindable());
+  state.score_phase = Stage2ScoreIoPhase::home_pending;
   assert(state.scratch_rebindable());
 
-  // A live one-sided record always pins the lane, even if phase metadata were
-  // corrupted to say that the context is waiting on a home RPC.
-  state.pending_graph.push_back({});
-  assert(!state.scratch_rebindable());
-  state.pending_graph.clear();
+  // A live one-sided vector record always pins the lane, even if phase metadata
+  // were corrupted to say that the context is waiting on a home RPC.
   state.pending_vectors.push_back({});
   assert(!state.scratch_rebindable());
 
   state.pending_vectors.clear();
-  state.phase = Stage2SearchIoPhase::score_body_pending;
+  state.score_phase = Stage2ScoreIoPhase::body_pending;
+  assert(!state.scratch_rebindable());
+}
+
+void test_split_plane_schedule_controls_home_rpc_overlap() {
+  const auto both = stage2_split_plane_schedule(
+    true, true, Stage2ScoreIoPhase::idle, Stage2GraphIoPhase::idle);
+  assert(both.dispatch_graph && both.dispatch_score);
+  const auto score_busy = stage2_split_plane_schedule(
+    true, true, Stage2ScoreIoPhase::home_pending,
+    Stage2GraphIoPhase::idle);
+  assert(score_busy.dispatch_graph && !score_busy.dispatch_score);
+  const auto graph_busy = stage2_split_plane_schedule(
+    true, true, Stage2ScoreIoPhase::idle,
+    Stage2GraphIoPhase::home_pending);
+  assert(!graph_busy.dispatch_graph && graph_busy.dispatch_score);
+  const auto direct_read = stage2_split_plane_schedule(
+    true, true, Stage2ScoreIoPhase::body_pending,
+    Stage2GraphIoPhase::idle);
+  assert(direct_read.dispatch_graph && !direct_read.dispatch_score);
+  const auto attempted = stage2_split_plane_schedule(
+    true, true, Stage2ScoreIoPhase::idle, Stage2GraphIoPhase::idle, 3);
+  assert(!attempted.dispatch_graph && !attempted.dispatch_score);
+
+  const auto serial_both = stage2_split_plane_schedule(
+    true, true, Stage2ScoreIoPhase::idle, Stage2GraphIoPhase::idle,
+    0, false, false);
+  assert(!serial_both.dispatch_graph && serial_both.dispatch_score);
+  const auto serial_graph_first = stage2_split_plane_schedule(
+    true, true, Stage2ScoreIoPhase::idle, Stage2GraphIoPhase::idle,
+    0, false, true);
+  assert(serial_graph_first.dispatch_graph &&
+         !serial_graph_first.dispatch_score);
+  const auto serial_score_only = stage2_split_plane_schedule(
+    true, false, Stage2ScoreIoPhase::idle, Stage2GraphIoPhase::idle, 0, false);
+  assert(!serial_score_only.dispatch_graph && serial_score_only.dispatch_score);
+  const auto serial_score_busy = stage2_split_plane_schedule(
+    true, true, Stage2ScoreIoPhase::home_pending,
+    Stage2GraphIoPhase::idle, 0, false);
+  assert(!serial_score_busy.dispatch_graph &&
+         !serial_score_busy.dispatch_score);
+  const auto serial_graph_busy = stage2_split_plane_schedule(
+    true, true, Stage2ScoreIoPhase::idle,
+    Stage2GraphIoPhase::home_pending, 0, false);
+  assert(!serial_graph_busy.dispatch_graph &&
+         !serial_graph_busy.dispatch_score);
+}
+
+void test_plane_clear_preserves_the_other_home_rpc_group() {
+  Stage2SearchIoState state;
+  state.initialized = true;
+  state.score_phase = Stage2ScoreIoPhase::home_pending;
+  state.graph_phase = Stage2GraphIoPhase::home_pending;
+  state.score_home_rpcs.resize(1);
+  state.home_expand_rpcs.resize(1);
+  state.score_home_rpcs[0].request_id = 17;
+  state.home_expand_rpcs[0].request_id = 23;
+  state.score_home_rpc_count = 1;
+  state.home_expand_rpc_count = 1;
+  state.score_home_wait_started_ns = 101;
+  state.graph_home_wait_started_ns = 202;
+  state.score_consumers.resize(1);
+  state.graph_consumers.resize(1);
+
+  state.clear_score_dispatch();
+  assert(state.score_phase == Stage2ScoreIoPhase::idle);
+  assert(state.graph_phase == Stage2GraphIoPhase::home_pending);
+  assert(state.score_home_wait_started_ns == 0);
+  assert(state.graph_home_wait_started_ns == 202);
+  assert(state.score_consumers.empty());
+  assert(state.graph_consumers.size() == 1);
+  assert(state.home_expand_rpc_count == 1);
+  assert(state.home_expand_rpcs[0].request_id == 23);
+  assert(state.scratch_rebindable());
+
+  state.clear_graph_dispatch();
+  assert(state.graph_phase == Stage2GraphIoPhase::idle);
+  assert(state.graph_home_wait_started_ns == 0);
+  assert(state.home_expand_rpc_count == 0);
   assert(!state.scratch_rebindable());
 }
 
@@ -249,6 +329,8 @@ int main() {
   test_score_many_uses_wire_capacity_instead_of_read_credits();
   test_score_many_rejects_latency_dominated_sparse_waves();
   test_home_rpc_wait_does_not_pin_registered_rdma_scratch();
+  test_split_plane_schedule_controls_home_rpc_overlap();
+  test_plane_clear_preserves_the_other_home_rpc_group();
   test_ordered_issue_policy_has_bounded_warmup_and_hard_stop();
   test_prefetch_cache_is_bounded_and_consumed_by_pointer();
   return 0;

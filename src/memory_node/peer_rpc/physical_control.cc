@@ -1,7 +1,10 @@
 #include "memory_node/peer_rpc/detail.hh"
 
+#include "memory_node/peer_rpc/stage1_control_fanout_policy.hh"
 #include "memory_node/storage_owner_runtime/exact_update_contract.hh"
 #include "vamana/storage_layout_resolver.hh"
+
+#include <cstdlib>
 
 namespace protocol = service::storage_owner;
 namespace authority = memory_node_storage_owner_index_detail;
@@ -77,6 +80,14 @@ bool MemoryNode::activate_local_cleanup_items(
       if (!authority::valid_authority_operation(item.token) ||
           item.authority_shard != authority_shard ||
           !valid_local_storage_node_pointer(target)) {
+        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+          std::cerr << "[cleanup-activate-debug] self=" << storage_id_
+                    << " reason=invalid_target id=" << item.id
+                    << " generation=" << item.old_generation
+                    << " target=" << target.raw_address
+                    << " authority=" << item.authority_shard
+                    << " expected_authority=" << authority_shard << std::endl;
+        }
         structurally_valid = false;
         whole_batch_claimed = false;
         continue;
@@ -150,8 +161,34 @@ bool MemoryNode::activate_local_cleanup_items(
       const RemotePtr target{claim.item.old_raw};
       NodeSnapshot snapshot;
       const bool snapshot_read = read_node_snapshot(target, snapshot);
-      if (!snapshot_read || snapshot.id != claim.item.id ||
-          snapshot.generation != claim.item.old_generation) {
+      const auto snapshot_disposition =
+        memory_node_peer_rpc_detail::cleanup_activation_snapshot(
+          snapshot_read,
+          snapshot.id == claim.item.id &&
+            snapshot.generation == claim.item.old_generation,
+          snapshot.deleted);
+      if (snapshot_disposition == memory_node_peer_rpc_detail::
+            CleanupActivationSnapshotDisposition::retry) {
+        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+          std::cerr << "[cleanup-activate-debug] self=" << storage_id_
+                    << " reason=snapshot_retry id=" << claim.item.id
+                    << " generation=" << claim.item.old_generation
+                    << " target=" << target.raw_address
+                    << " header=" << load_local_node_header_acquire(target)
+                    << std::endl;
+        }
+        continue;
+      }
+      if (snapshot_disposition == memory_node_peer_rpc_detail::
+            CleanupActivationSnapshotDisposition::not_found) {
+        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+          std::cerr << "[cleanup-activate-debug] self=" << storage_id_
+                    << " reason=not_found id=" << claim.item.id
+                    << " expected_generation=" << claim.item.old_generation
+                    << " observed_id=" << snapshot.id
+                    << " observed_generation=" << snapshot.generation
+                    << " target=" << target.raw_address << std::endl;
+        }
         output.status = static_cast<u32>(
           protocol::MutationStatus::not_found);
         continue;
@@ -445,6 +482,41 @@ bool MemoryNode::apply_local_authority_placement_items(
       item.id, item.token, item.generation, expected, desired,
       item.expected_placement_version, &resulting_version);
     output.resulting_placement_version = resulting_version;
+    if (state == AuthorityRelocateState::busy &&
+        std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      static std::mutex debug_mutex;
+      static std::unordered_map<u64, std::chrono::steady_clock::time_point>
+        last_logs;
+      const auto now = std::chrono::steady_clock::now();
+      std::lock_guard<std::mutex> debug_lock(debug_mutex);
+      auto& last = last_logs[item.token.client_batch_id];
+      if (now - last >= std::chrono::seconds(5)) {
+        last = now;
+        DynamicFreshnessShard& shard = dynamic_freshness_shard(item.id);
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        const auto directory = load_authority_directory_state_locked(shard, item.id);
+        std::cerr << "[stage2-authority-debug] self=" << storage_id_
+                  << " id=" << item.id
+                  << " wait_source=" << item.token.source_client
+                  << " wait_batch=" << item.token.client_batch_id
+                  << " expected_raw=" << item.expected_raw
+                  << " desired_raw=" << item.desired_raw
+                  << " directory_generation="
+                  << (directory.exists ? directory.entry.generation : 0)
+                  << " directory_deleted="
+                  << (directory.exists && directory.entry.deleted);
+        if (directory.lease.has_value()) {
+          const auto& lease = *directory.lease;
+          std::cerr << " lease_source=" << lease.operation.source_client
+                    << " lease_batch=" << lease.operation.client_batch_id
+                    << " lease_generation=" << lease.generation
+                    << " lease_kind=" << static_cast<u32>(lease.kind);
+        } else {
+          std::cerr << " lease=none";
+        }
+        std::cerr << std::endl;
+      }
+    }
     switch (state) {
       case AuthorityRelocateState::committed:
         output.status = static_cast<u32>(
@@ -802,6 +874,26 @@ bool MemoryNode::handle_peer_cleanup_activate_request(
     std::memcpy(protocol::cleanup_activate_results(response.data()),
                 results.data(), results.size() * sizeof(results[0]));
   }
+  if (mutation_completion_trace_enabled()) {
+    for (u32 index = 0; index < item_count; ++index) {
+      std::cerr << "[mutation-trace] cleanup reply home=" << storage_id_
+                << " authority=" << source_shard
+                << " request_id=" << header.request_id
+                << " operation_id=" << items[index].token.client_batch_id
+                << " id=" << items[index].id
+                << " action=" << items[index].action
+                << " status=" << results[index].status
+                << " sequence=" << results[index].maintenance_sequence
+                << std::endl;
+    }
+  }
+  if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    std::cerr << "[cleanup-wire-reply] self=" << storage_id_
+              << " authority=" << source_shard
+              << " request_id=" << header.request_id
+              << " item_count=" << item_count
+              << " processed=" << processed << std::endl;
+  }
   send_peer_rpc_message(source_shard, response.data(), response.size());
   return processed;
 }
@@ -939,14 +1031,30 @@ MemoryNode::TryPeerResponse MemoryNode::wait_peer_control_response(
     PeerResponseLease& lease,
     const Configuration& config) {
   lease = {};
+  constexpr auto response_timeout = std::chrono::milliseconds(1000);
   const auto deadline = std::chrono::steady_clock::now() +
-    std::chrono::milliseconds(config.storage_owner_rpc_timeout_ms);
+    std::min(std::chrono::milliseconds(config.storage_owner_rpc_timeout_ms),
+             response_timeout);
+  auto last_debug = std::chrono::steady_clock::now();
   for (;;) {
     const TryPeerResponse state = try_consume_peer_rpc_response(
       request_id, target_shard, response_type, item_count,
       header, payload, lease);
     if (state != TryPeerResponse::pending) return state;
-    if (std::chrono::steady_clock::now() >= deadline) return state;
+    const auto now = std::chrono::steady_clock::now();
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+        now - last_debug >= std::chrono::seconds(5)) {
+      last_debug = now;
+      std::cerr << "[control-wait-debug] self=" << storage_id_
+                << " target=" << target_shard
+                << " response_type=" << static_cast<u32>(response_type)
+                << " request_id=" << request_id
+                << " item_count=" << item_count
+                << " registry_state=" << (peer_async_responses_ == nullptr
+                  ? -2 : peer_async_responses_->debug_response_state(request_id))
+                << std::endl;
+    }
+    if (now >= deadline) return state;
     std::unique_lock<std::mutex> lock(peer_completion_mutex_);
     peer_completion_cv_.wait_for(lock, std::chrono::microseconds(100));
   }
@@ -955,9 +1063,22 @@ MemoryNode::TryPeerResponse MemoryNode::wait_peer_control_response(
 bool MemoryNode::activate_cleanup_fanout_and_wait(
     span<const protocol::CleanupActivateItem> items,
     vec<protocol::CleanupActivateResult>& results,
-    const Configuration& config) {
+    const Configuration& config,
+    const std::function<void(
+      span<const protocol::CleanupActivateItem>,
+      span<const protocol::CleanupActivateResult>)>& on_resolved) {
   results.assign(items.size(), {});
   if (items.empty()) return true;
+  const auto publish_resolved = [&](const protocol::CleanupActivateItem& item,
+                                    const protocol::CleanupActivateResult& result) {
+    if (on_resolved &&
+        static_cast<protocol::CleanupActivateAction>(item.action) ==
+          protocol::CleanupActivateAction::activate &&
+        result.status == static_cast<u32>(protocol::MutationStatus::ok)) {
+      on_resolved(span<const protocol::CleanupActivateItem>{&item, 1},
+                  span<const protocol::CleanupActivateResult>{&result, 1});
+    }
+  };
 
   struct IndexedItem {
     protocol::CleanupActivateItem item{};
@@ -1040,6 +1161,7 @@ bool MemoryNode::activate_cleanup_fanout_and_wait(
       results[local->second[index].input_index] = local_results[index];
       success &= local_results[index].status != static_cast<u32>(
         protocol::MutationStatus::failed);
+      publish_resolved(local_items[index], local_results[index]);
     }
   }
 
@@ -1054,8 +1176,7 @@ bool MemoryNode::activate_cleanup_fanout_and_wait(
           protocol::PeerRpcType::cleanup_activate_request,
           protocol::PeerRpcType::cleanup_activate_response,
           request.request_id, static_cast<u32>(request.items.size()),
-          request.items.data(),
-          request.items.size() * sizeof(request.items[0]),
+          request.items.data(), request.items.size() * sizeof(request.items[0]),
           protocol::cleanup_activate_request_bytes(
             static_cast<u32>(request.items.size())), config);
         if (!request.posted) continue;
@@ -1102,7 +1223,12 @@ bool MemoryNode::activate_cleanup_fanout_and_wait(
             results[request.input_indices[index]] = wire_results[index];
           }
           complete = acknowledge_peer_rpc_response(response_lease);
-          if (complete) break;
+          if (complete) {
+            for (size_t index = 0; index < request.items.size(); ++index) {
+              publish_resolved(request.items[index], wire_results[index]);
+            }
+            break;
+          }
         }
       }
       request.posted = false;
@@ -1403,6 +1529,202 @@ bool MemoryNode::relocate_batch_via_authority(
   return success;
 }
 
+bool MemoryNode::control_dynamic_nodes_on_shards(
+    span<const u32> physical_shards,
+    span<const protocol::DynamicNodeControlItem> items,
+    vec<protocol::DynamicNodeControlResult>& results,
+    const Configuration& config) {
+  results.assign(items.size(), {});
+  if (items.empty() || physical_shards.size() != items.size() ||
+      items.size() > config.storage_owner_batch_max) {
+    return false;
+  }
+  std::map<u32, vec<size_t>> groups;
+  for (size_t index = 0; index < items.size(); ++index) {
+    if (physical_shards[index] >= num_storage_nodes_) return false;
+    groups[physical_shards[index]].push_back(index);
+  }
+
+  struct PendingGroup {
+    u32 shard{};
+    u64 request_id{};
+    vec<protocol::DynamicNodeControlItem> items;
+    vec<size_t> input_indices;
+    vec<byte_t> response_payload;
+    std::chrono::steady_clock::time_point deadline{};
+    u32 attempts_started{};
+    bool attempt_active{};
+    bool posted{};
+    bool complete{};
+  };
+  vec<PendingGroup> pending;
+  vec<protocol::DynamicNodeControlItem> local_items;
+  vec<size_t> local_indices;
+  for (const auto& [shard, indices] : groups) {
+    vec<protocol::DynamicNodeControlItem> group_items;
+    for (const size_t index : indices) group_items.push_back(items[index]);
+    if (shard == storage_id_) {
+      local_items = std::move(group_items);
+      local_indices = indices;
+      continue;
+    }
+    PendingGroup request;
+    request.shard = shard;
+    request.request_id = allocate_peer_request_id();
+    request.items = std::move(group_items);
+    request.input_indices = indices;
+    request.response_payload.reserve(peer_rpc_runtime_.message_bytes);
+    pending.push_back(std::move(request));
+  }
+
+  const auto timeout =
+    std::chrono::milliseconds(config.storage_owner_rpc_timeout_ms);
+  const auto try_post = [&](PendingGroup& request) {
+    const u32 item_count = static_cast<u32>(request.items.size());
+    request.posted = try_post_peer_rpc_request_attempt(
+      request.shard, protocol::PeerRpcType::dynamic_node_control_request,
+      protocol::PeerRpcType::dynamic_node_control_response,
+      request.request_id, item_count, request.items.data(),
+      request.items.size() * sizeof(request.items[0]),
+      protocol::dynamic_node_control_request_bytes(item_count),
+      PeerRpcSendClass::control);
+    return request.posted;
+  };
+  for (PendingGroup& request : pending) {
+    request.attempts_started = 1;
+    request.attempt_active = true;
+    request.deadline = std::chrono::steady_clock::now() + timeout;
+    (void)try_post(request);
+  }
+  const auto cancel_incomplete = [&](void*) {
+    for (const PendingGroup& request : pending) {
+      if (!request.complete) cancel_peer_rpc_response(request.request_id);
+    }
+  };
+  std::unique_ptr<void, decltype(cancel_incomplete)> response_guard{
+    reinterpret_cast<void*>(1), cancel_incomplete};
+
+  if (!local_items.empty()) {
+    vec<protocol::DynamicNodeControlResult> local_results;
+    if (!apply_local_dynamic_node_control_items(
+          storage_id_, span<const protocol::DynamicNodeControlItem>{local_items},
+          local_results, config) ||
+        local_results.size() != local_items.size()) {
+      return false;
+    }
+    for (size_t slot = 0; slot < local_indices.size(); ++slot) {
+      results[local_indices[slot]] = local_results[slot];
+    }
+  }
+
+  bool success = true;
+  size_t remaining = pending.size();
+  while (remaining != 0 &&
+         !peer_reverse_shutdown_.load(std::memory_order_acquire)) {
+    bool made_progress = false;
+    for (PendingGroup& request : pending) {
+      if (request.complete) continue;
+      auto now = std::chrono::steady_clock::now();
+      if (!request.attempt_active) {
+        if (request.attempts_started == 3) {
+          cancel_peer_rpc_response(request.request_id);
+          request.complete = true;
+          --remaining;
+          success = false;
+          made_progress = true;
+          continue;
+        }
+        ++request.attempts_started;
+        request.attempt_active = true;
+        request.posted = false;
+        request.deadline = now + timeout;
+      }
+      if (!request.posted) {
+        made_progress = try_post(request) || made_progress;
+        now = std::chrono::steady_clock::now();
+        if (!request.posted && now >= request.deadline) {
+          cancel_peer_rpc_response(request.request_id);
+          request.attempt_active = false;
+          made_progress = true;
+        }
+        if (!request.posted) continue;
+      }
+
+      protocol::PeerRpcHeader header{};
+      request.response_payload.clear();
+      PeerResponseLease response_lease{};
+      const u32 item_count = static_cast<u32>(request.items.size());
+      const TryPeerResponse state = try_consume_peer_rpc_response(
+        request.request_id, request.shard,
+        protocol::PeerRpcType::dynamic_node_control_response,
+        item_count, header, request.response_payload, response_lease);
+      now = std::chrono::steady_clock::now();
+      if (state == TryPeerResponse::pending) {
+        if (now >= request.deadline) {
+          cancel_peer_rpc_response(request.request_id);
+          request.attempt_active = false;
+          request.posted = false;
+          made_progress = true;
+        }
+        continue;
+      }
+      if (state == TryPeerResponse::stale) {
+        request.attempt_active = false;
+        request.posted = false;
+        made_progress = true;
+        continue;
+      }
+
+      bool valid = state == TryPeerResponse::success &&
+        request.response_payload.size() ==
+          protocol::dynamic_node_control_response_bytes(item_count) &&
+        header.magic == protocol::kPeerRpcMagic &&
+        header.version == protocol::kPeerRpcVersion &&
+        header.type == static_cast<u32>(
+          protocol::PeerRpcType::dynamic_node_control_response) &&
+        header.source_shard == request.shard &&
+        header.item_count == item_count &&
+        header.request_id == request.request_id &&
+        header.status == static_cast<u32>(protocol::InsertStatus::ok) &&
+        header.reserved == 0;
+      const auto* wire = protocol::dynamic_node_control_results(
+        request.response_payload.data());
+      if (valid) {
+        for (u32 item = 0; item < item_count; ++item) {
+          valid &= wire[item].reserved == 0 &&
+            wire[item].status <= static_cast<u32>(
+              protocol::DynamicNodeControlStatus::failed);
+        }
+      }
+      if (valid) {
+        lib_assert(acknowledge_peer_rpc_response(response_lease),
+                   "validated dynamic-control response lost its lease");
+        for (size_t slot = 0; slot < request.input_indices.size(); ++slot) {
+          results[request.input_indices[slot]] = wire[slot];
+        }
+        request.complete = true;
+        --remaining;
+      } else {
+        if (response_lease.valid()) {
+          lib_assert(rearm_peer_rpc_response(response_lease),
+                     "invalid dynamic-control response could not be rearmed");
+        }
+        request.attempt_active = false;
+        request.posted = false;
+      }
+      made_progress = true;
+    }
+    if (!made_progress && remaining != 0) {
+      std::unique_lock<std::mutex> lock(peer_completion_mutex_);
+      peer_completion_cv_.wait_for(lock, std::chrono::microseconds(100));
+    }
+  }
+  for (const PendingGroup& request : pending) {
+    if (!request.complete) success = false;
+  }
+  return success;
+}
+
 bool MemoryNode::control_dynamic_node_on_shard(
     u32 physical_shard,
     const protocol::DynamicNodeControlItem& item,
@@ -1536,9 +1858,24 @@ void MemoryNode::peer_cleanup_control_worker_loop() {
           completion.completed_prefix + 1 == task.source_sequence;
       });
     }
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      std::lock_guard<std::mutex> lock(debug_cleanup_active_requests_mutex_);
+      debug_cleanup_active_requests_[std::this_thread::get_id()] = {
+        task.header.request_id, std::chrono::steady_clock::now()};
+    }
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      std::cerr << "[cleanup-wire-request] self=" << storage_id_
+                << " authority=" << task.source_shard
+                << " request_id=" << task.header.request_id
+                << " item_count=" << task.header.item_count << std::endl;
+    }
     (void)handle_peer_cleanup_activate_request(
       task.source_shard, task.header,
       items, config);
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      std::lock_guard<std::mutex> lock(debug_cleanup_active_requests_mutex_);
+      debug_cleanup_active_requests_.erase(std::this_thread::get_id());
+    }
     lib_assert(peer_request_deduplicator_->abandon(
                  task.dedup_lease, task.source_shard, task.header),
                "cleanup-control completion lost its dedup lease");

@@ -1,6 +1,8 @@
 #include "service/compute_service/detail.hh"
 #include "service/compute_service/storage_owner/batch_policy.hh"
 
+#include <cstdlib>
+
 using namespace compute_service_detail;
 
 void ComputeService::run_storage_insert_progress_loop() {
@@ -92,12 +94,11 @@ bool ComputeService::drain_storage_owner_submissions(u32& first_owner) {
   if (owner_count == 0) return false;
   const u64 max_wait_ns =
     static_cast<u64>(config_.storage_owner_batch_max_wait_us) * 1000ull;
-  const bool flow_control =
-    config_.storage_owner_flow_control_backlog_low != 0 &&
-    storage_flow_control_next_sequences_ != nullptr;
-  const u64 flow_control_max_delay_ns =
-    static_cast<u64>(config_.storage_owner_flow_control_max_delay_us) *
-      1000ull;
+  const bool flow_control = config_.storage_owner_repair_deadline_ms != 0 &&
+    !config_.synchronous_exact_updates_enabled() &&
+    search_engine_ != nullptr && storage_flow_control_next_sequences_ != nullptr;
+  const u64 repair_deadline_ns =
+    config_.storage_owner_repair_deadline_ms * 1'000'000ull;
   const auto now_ns = []() {
     return static_cast<u64>(std::chrono::duration_cast<
       std::chrono::nanoseconds>(
@@ -108,6 +109,55 @@ bool ComputeService::drain_storage_owner_submissions(u32& first_owner) {
     const u32 owner = (first_owner + offset) % owner_count;
     auto& state = *storage_insert_owners_[owner];
     const u64 owner_now_ns = now_ns();
+    u64 durable = 0;
+    u64 next = 0;
+    u64 target = 0;
+    const auto repair_now = std::chrono::steady_clock::time_point(
+      std::chrono::nanoseconds(owner_now_ns));
+    auto& timing = storage_repair_timing_[owner];
+    if (flow_control) {
+      durable = storage_flow_control_durable_sequences_[owner].load(
+        std::memory_order_acquire);
+      next = storage_flow_control_next_sequences_[owner].load(
+        std::memory_order_acquire);
+      target = storage_maintenance_targets_[owner].load(
+        std::memory_order_acquire);
+      if (repair_deadline_ns != 0) {
+        while (!timing.completion_times.empty() &&
+               timing.completion_times.begin()->first <= durable) {
+          const u64 delay_ns = static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+              repair_now - timing.completion_times.begin()->second).count());
+          state.repair_max_delay_ns.store(
+            std::max(
+              state.repair_max_delay_ns.load(std::memory_order_relaxed),
+              delay_ns),
+            std::memory_order_relaxed);
+          if (storage_owner_repair_deadline_exceeded(
+                delay_ns, repair_deadline_ns)) {
+            state.repair_deadline_misses.fetch_add(
+              1, std::memory_order_relaxed);
+          }
+          timing.completion_times.erase(timing.completion_times.begin());
+        }
+        if (timing.rate_started == std::chrono::steady_clock::time_point{}) {
+          timing.rate_started = repair_now;
+          timing.rate_sequence = durable;
+        } else if (repair_now - timing.rate_started >=
+                   std::chrono::milliseconds(200)) {
+          const double elapsed = std::chrono::duration<double>(
+            repair_now - timing.rate_started).count();
+          const u64 completed = durable >= timing.rate_sequence
+            ? durable - timing.rate_sequence : 0;
+          const double instant_rate = completed / elapsed;
+          timing.durable_rate_per_sec = timing.durable_rate_per_sec == 0.0
+            ? instant_rate
+            : 0.8 * timing.durable_rate_per_sec + 0.2 * instant_rate;
+          timing.rate_started = repair_now;
+          timing.rate_sequence = durable;
+        }
+      }
+    }
     if (!storage_owner_retry_deadline_elapsed(
           state.retry_not_before_ns.load(std::memory_order_acquire),
           owner_now_ns)) {
@@ -137,6 +187,46 @@ bool ComputeService::drain_storage_owner_submissions(u32& first_owner) {
         state.pending_producers.load(std::memory_order_acquire), batch_max,
         state.oldest_published_observed_ns, observed_now_ns, max_wait_ns);
       if (decision.take == 0) break;
+      if (flow_control) {
+        const u64 backlog = storage_owner_repair_backlog(next, target, durable);
+        const u64 oldest_age_ns = repair_deadline_ns == 0 ||
+            timing.completion_times.empty()
+          ? 0
+          : static_cast<u64>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                repair_now - timing.completion_times.begin()->second).count());
+        const bool deadline_blocked = storage_owner_repair_deadline_blocked(
+          oldest_age_ns, backlog, timing.durable_rate_per_sec,
+          repair_deadline_ns);
+        if (deadline_blocked) {
+          const u64 not_before = observed_now_ns +
+            static_cast<u64>(std::max<u32>(
+              1, config_.storage_owner_flow_control_poll_ms)) * 1'000'000ull;
+          u64 observed_deadline =
+            state.retry_not_before_ns.load(std::memory_order_acquire);
+          while (observed_deadline < not_before &&
+                 !state.retry_not_before_ns.compare_exchange_weak(
+                   observed_deadline, not_before,
+                   std::memory_order_release, std::memory_order_acquire)) {
+          }
+          const u64 blocks = state.repair_deadline_blocks.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+          if (service::storage_owner::mutation_completion_trace_enabled() &&
+              (blocks <= 8 || (blocks & (blocks - 1)) == 0)) {
+            std::cerr << "[mutation-trace] deadline blocked owner=" << owner
+                      << " blocks=" << blocks << " backlog=" << backlog
+                      << " next=" << next << " target=" << target
+                      << " durable=" << durable
+                      << " oldest_ms=" << oldest_age_ns / 1e6
+                      << " rate=" << timing.durable_rate_per_sec
+                      << " ready=" << ready << " active_rpcs=" << active
+                      << std::endl;
+          }
+          // Keep the queued writes and continue CQ/completion progress. Only
+          // new submissions to this owner wait for durable capacity.
+          break;
+        }
+      }
       state.max_active_rpcs = std::max(state.max_active_rpcs, active);
 
       const u32 slot_id = state.free_slots.back();
@@ -194,15 +284,16 @@ bool ComputeService::drain_storage_owner_submissions(u32& first_owner) {
                   << state.partial_visible_batches
                   << " published="
                   << state.published_tasks.load(std::memory_order_relaxed);
-        if (state.flow_control_throttled_batches != 0) {
-          std::cerr << " flow_control_throttled_batches="
-                    << state.flow_control_throttled_batches
-                    << " flow_control_avg_delay_us="
-                    << (static_cast<double>(state.flow_control_delay_ns_total) /
-                        static_cast<double>(
-                          state.flow_control_throttled_batches) / 1000.0)
-                    << " flow_control_max_backlog="
-                    << state.flow_control_max_backlog;
+        const u64 repair_deadline_blocks =
+          state.repair_deadline_blocks.load(std::memory_order_relaxed);
+        const u64 repair_max_delay_ns =
+          state.repair_max_delay_ns.load(std::memory_order_relaxed);
+        if (repair_deadline_blocks != 0 || repair_max_delay_ns != 0) {
+          std::cerr << " repair_deadline_blocks=" << repair_deadline_blocks
+                    << " repair_deadline_misses="
+                    << state.repair_deadline_misses.load(
+                         std::memory_order_relaxed)
+                    << " repair_max_delay_ms=" << repair_max_delay_ns / 1e6;
         }
         std::cerr << std::endl;
       }
@@ -211,45 +302,7 @@ bool ComputeService::drain_storage_owner_submissions(u32& first_owner) {
         state.max_active_rpcs,
         static_cast<u32>(state.slots.size() - state.free_slots.size()));
       progressed = true;
-      if (flow_control) {
-        // Read durable before next so a concurrent refresh can only
-        // overestimate the backlog (see the poller's store order).
-        const u64 durable =
-          storage_flow_control_durable_sequences_[owner].load(
-            std::memory_order_acquire);
-        const u64 next =
-          storage_flow_control_next_sequences_[owner].load(
-            std::memory_order_acquire);
-        const u64 target =
-          storage_maintenance_targets_[owner].load(
-            std::memory_order_acquire);
-        const u64 backlog =
-          storage_owner_flow_control_backlog(next, target, durable);
-        const u64 delay_ns = storage_owner_flow_control_delay_ns(
-          backlog,
-          config_.storage_owner_flow_control_backlog_low,
-          config_.storage_owner_flow_control_backlog_high,
-          flow_control_max_delay_ns);
-        if (delay_ns != 0) {
-          // Pace instead of blocking: one batch per delay interval per owner.
-          // Raise-only so a concurrent busy-ACK backoff with a later deadline
-          // is never weakened. A token completion may still clear the gate
-          // early; the next posted batch simply re-arms it.
-          const u64 not_before = now_ns() + delay_ns;
-          u64 observed_deadline =
-            state.retry_not_before_ns.load(std::memory_order_acquire);
-          while (observed_deadline < not_before &&
-                 !state.retry_not_before_ns.compare_exchange_weak(
-                   observed_deadline, not_before,
-                   std::memory_order_release, std::memory_order_acquire)) {
-          }
-          ++state.flow_control_throttled_batches;
-          state.flow_control_delay_ns_total += delay_ns;
-          state.flow_control_max_backlog =
-            std::max(state.flow_control_max_backlog, backlog);
-          break;
-        }
-      }
+
     }
   }
   first_owner = (first_owner + 1) % owner_count;

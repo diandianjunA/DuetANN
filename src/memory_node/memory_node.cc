@@ -2,6 +2,7 @@
 
 #include <bit>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +17,8 @@
 #include "vamana/centroid_state.hh"
 #include "vamana/storage_layout_resolver.hh"
 
+MemoryNode* dvstor_active_memory_node = nullptr;
+
 MemoryNode::MemoryNode(Configuration& config)
     : context_(config), cm_(context_, config), num_clients_(config.num_clients),
       storage_id_(config.storage_id),
@@ -23,11 +26,11 @@ MemoryNode::MemoryNode(Configuration& config)
                                                       : static_cast<u32>(config.storage_peers.size())),
       vector_id_namespace_size_(config.vector_id_namespace_size),
       storage_owner_peer_rdma_tokens_(std::max<u32>(1, config.storage_owner_peer_rdma_tokens)),
-      dynamic_graph_extent_publication_enabled_(
-        config.adaptive_dynamic_graph_access_enabled()),
+      graph_extent_enabled_(config.adaptive_dynamic_graph_access_enabled()),
       index_region_(context_),
       peer_rdma_read_outstanding_(num_storage_nodes_),
       mn_memory_bytes_(static_cast<u64>(config.mn_memory_gb) * 1073741824ul) {
+  dvstor_active_memory_node = this;
   lib_assert(num_storage_nodes_ > 0 &&
                num_storage_nodes_ <= RemotePtr::MEMORY_NODE_MASK + 1,
              "tagged RemotePtr supports between 1 and 64 storage shards");
@@ -232,7 +235,8 @@ MemoryNode::MemoryNode(Configuration& config)
   // notify compute nodes that we are ready
   cm_.synchronize();
 
-  wait_for_start_signal(config);
+  const storage_startup::Response startup_response =
+    receive_storage_start_signal(config);
   setup_storage_peers(config);
   setup_insert_runtime(config);
   storage_worker_config_ = std::make_unique<Configuration>(config);
@@ -248,7 +252,7 @@ MemoryNode::MemoryNode(Configuration& config)
       cm_.accept_reconnection(storage_insert_shutdown_);
     });
   }
-  service_storage_runtime(config);
+  service_storage_runtime(config, startup_response);
 
   storage_insert_shutdown_.store(true, std::memory_order_release);
   if (storage_insert_tasks_) storage_insert_tasks_->notify_all();
@@ -278,6 +282,17 @@ MemoryNode::MemoryNode(Configuration& config)
   storage_insert_shutdown_.store(false, std::memory_order_release);
   } while (true);
 
+  dump_final_graph_for_audit();
+  const auto extent_stats = graph_extent_cache_.stats();
+  print_status(
+    "quantized extent reads short/full/fallback/refine/promote/demote/conflict=" +
+    std::to_string(extent_stats.short_reads) + "/" +
+    std::to_string(extent_stats.full_reads) + "/" +
+    std::to_string(extent_stats.fallbacks) + "/" +
+    std::to_string(extent_stats.refined_unknown) + "/" +
+    std::to_string(extent_stats.promotions) + "/" +
+    std::to_string(extent_stats.demotions) + "/" +
+    std::to_string(extent_stats.conflicts));
   print_status("memory node shutting down");
   std::cout << timing_ << std::endl;
 }
@@ -285,6 +300,13 @@ MemoryNode::MemoryNode(Configuration& config)
 u64 MemoryNode::elapsed_ns_since(const std::chrono::steady_clock::time_point start) {
   return static_cast<u64>(
     std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+}
+
+void MemoryNode::request_shutdown() {
+  storage_insert_shutdown_.store(true, std::memory_order_release);
+  if (storage_insert_tasks_) storage_insert_tasks_->notify_all();
+  peer_completion_cv_.notify_all();
+  notify_storage_owner_maintenance();
 }
 
 void MemoryNode::notify_storage_owner_maintenance() {
@@ -868,7 +890,8 @@ void MemoryNode::allocate_memory() {
   t_allocate->stop();
 }
 
-void MemoryNode::wait_for_start_signal(const Configuration& config) {
+storage_startup::Response MemoryNode::receive_storage_start_signal(
+    const Configuration& config) {
   print_status("waiting for compute-node startup barrier");
   storage_startup::Request request{};
   LocalMemoryRegion region{context_, &request, sizeof(request)};
@@ -878,28 +901,25 @@ void MemoryNode::wait_for_start_signal(const Configuration& config) {
     config.storage_owner_update_completion_mode,
     config.dynamic_graph_access_mode,
     config.gpu_rdma_search_progression_mode);
-  const storage_startup::Response response =
-    storage_startup::evaluate_request(
-      request, local_feature_modes,
-      gpu_search::format::kMetadataSchemaVersion, storage_id_,
-      num_storage_nodes_, vector_id_namespace_size_,
-      gpu_index_build_fingerprint_, gpu_shard_build_fingerprint_);
+  return storage_startup::evaluate_request(
+    request, local_feature_modes,
+    gpu_search::format::kMetadataSchemaVersion, storage_id_,
+    num_storage_nodes_, vector_id_namespace_size_,
+    gpu_index_build_fingerprint_, gpu_shard_build_fingerprint_);
+}
+
+void MemoryNode::publish_storage_start_response(
+    const storage_startup::Response& response) {
   cm_.initiator_qp->post_send_inlined(
     &response, sizeof(response), IBV_WR_SEND);
   context_.poll_send_cq_until_completion();
   lib_assert(response.ready != 0,
              "compute/storage startup contract mismatch: flags=" +
                std::to_string(response.mismatch_flags) +
-               " compute_modes=" +
-               std::to_string(request.feature_modes) +
                " storage_modes=" +
                std::to_string(response.feature_modes) +
-               " compute_schema=" +
-               std::to_string(request.schema_version) +
                " storage_schema=" +
                std::to_string(response.schema_version) +
-               " compute_shard=" +
-               std::to_string(request.expected_shard) +
                " storage_shard=" + std::to_string(response.shard));
 }
 
@@ -1773,6 +1793,25 @@ bool MemoryNode::apply_local_centroid_membership_ops(
       continue;
     }
     if (kind == Kind::add) {
+      static std::FILE* graph_audit = [] {
+        const char* path = std::getenv("DVSTOR_GRAPH_AUDIT");
+        return path == nullptr ? nullptr : std::fopen(path, "a");
+      }();
+      if (graph_audit != nullptr && pointer.is_dynamic() &&
+          std::getenv("DVSTOR_GRAPH_AUDIT_FINAL_ONLY") == nullptr) {
+        GraphAdjacency adjacency;
+        lib_assert(read_graph_adjacency(pointer, adjacency),
+                   "graph audit could not read the final local adjacency");
+        std::fprintf(graph_audit, "node %llu %u %llu",
+                     static_cast<unsigned long long>(id), storage_id_,
+                     static_cast<unsigned long long>(pointer.raw_address));
+        for (const RemotePtr neighbor : adjacency.stable) {
+          std::fprintf(graph_audit, " %llu",
+                       static_cast<unsigned long long>(neighbor.raw_address));
+        }
+        std::fprintf(graph_audit, "\n");
+        std::fflush(graph_audit);
+      }
       header_ref.fetch_or(
         static_cast<u64>(VamanaNode::HEADER_CENTROID_ACCOUNTED),
         std::memory_order_release);

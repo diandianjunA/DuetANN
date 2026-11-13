@@ -471,11 +471,9 @@ void filter_final_partition_local_beam(
 
 // Fixed-width continuation state used by Stage2. Stage1's final local beam is
 // seeded as already expanded, so pointers already carried across the phase
-// boundary are never repeated. Stage2 is deliberately remote-only: Stage1 has
-// already run the home-shard graph to natural convergence and exported its
-// complete cross-shard boundary. Following a remote edge back into the home
-// shard would restart local search, duplicate work, and invalidate the
-// locality argument of the two-stage design.
+// boundary are never repeated. Later expansions may discover a home-shard node
+// that Stage1 had not visited. Such a node is scored and expanded normally;
+// only identities already present in the handoff are suppressed.
 class PartitionContinuationBeam {
 public:
   PartitionContinuationBeam(u32 partition_id, u32 beam_width)
@@ -516,12 +514,8 @@ public:
     }
   }
 
-  bool try_visit_remote(RemotePtr pointer) {
-    if (pointer.is_null() ||
-        pointer.memory_node() == partition_id_ ||
-        visited_.contains(pointer)) {
-      return false;
-    }
+  bool try_visit(RemotePtr pointer) {
+    if (pointer.is_null() || visited_.contains(pointer)) return false;
     if (visited_.size() >= budget_.max_candidate_visits) {
       budget_exhausted_ = true;
       return false;
@@ -529,7 +523,7 @@ public:
     return visited_.insert(pointer).second;
   }
 
-  void add_remote(RemotePtr pointer, distance_t distance) {
+  void add_scored(RemotePtr pointer, distance_t distance) {
     add(pointer, distance, false);
   }
 
@@ -754,7 +748,7 @@ public:
     }
     for (size_t item = 0; item < admitted_frontier; ++item) {
       const RemotePtr pointer = seed.remote_frontier[item];
-      if (state.search.try_visit_remote(pointer)) {
+      if (state.search.try_visit(pointer)) {
         state.pending_scores.push_back({search_index, pointer, 0});
       }
     }
@@ -901,7 +895,7 @@ public:
     }
     state.pending_scores.pop_back();
     if (distance.has_value()) {
-      state.search.add_remote(pointer, *distance);
+      state.search.add_scored(pointer, *distance);
     }
 
     if (state.pending_scores.empty()) {
@@ -977,7 +971,7 @@ public:
     }
     state.pending_expand.reset();
     for (const RemotePtr neighbor : neighbors) {
-      if (state.search.try_visit_remote(neighbor)) {
+      if (state.search.try_visit(neighbor)) {
         state.pending_scores.push_back({search_index, neighbor, 0});
       }
     }
@@ -1312,9 +1306,9 @@ private:
 
 // Continue Stage1 using its exact local beam and the cross-partition frontier
 // discovered during local expansion. score_batch must invoke emit(ptr, dist)
-// for every live input pointer. expand enumerates one remote node's neighbors.
-// Both callbacks may batch RDMA internally; the algorithm itself performs no
-// per-shard restart and never grows beyond L candidates.
+// for every live input pointer. expand enumerates one selected node's neighbors
+// on any shard. Both callbacks may batch RDMA internally; the logical beam
+// remains single-owner and never grows beyond L candidates.
 template <typename ScoreBatch, typename Expand>
 const vec<PartitionLocalSearchEntry>& continue_partition_construction_search_into(
     span<const PartitionLocalSearchEntry> local_beam,
@@ -1339,12 +1333,12 @@ const vec<PartitionLocalSearchEntry>& continue_partition_construction_search_int
   const auto consider_batch = [&](span<const RemotePtr> candidates) {
     pending.clear();
     for (const RemotePtr pointer : candidates) {
-      if (search.try_visit_remote(pointer)) pending.push_back(pointer);
+      if (search.try_visit(pointer)) pending.push_back(pointer);
     }
     if (pending.empty()) return;
     std::invoke(score_batch, span<const RemotePtr>{pending},
                 [&](RemotePtr pointer, distance_t distance) {
-                  search.add_remote(pointer, distance);
+                  search.add_scored(pointer, distance);
                 });
   };
 

@@ -63,6 +63,12 @@ struct MaintenanceObservation {
   uint64_t stage2_home_score_rpc_queries{};
   uint64_t stage2_home_score_rpc_request_bytes{};
   uint64_t stage2_home_score_rpc_response_bytes{};
+  uint64_t stage2_score_home_wait_ns{};
+  uint64_t stage2_graph_home_wait_ns{};
+  uint64_t stage2_score_home_dispatches{};
+  uint64_t stage2_graph_home_dispatches{};
+  uint64_t stage2_dual_plane_dispatches{};
+  uint64_t stage2_dual_plane_waits{};
   std::array<uint64_t, kStage2TimingPhaseCount> stage2_phase_attempts{};
   std::array<uint64_t, kStage2TimingPhaseCount>
     stage2_phase_task_attempts{};
@@ -173,6 +179,12 @@ struct MaintenanceLogSummary {
   uint64_t stage2_home_score_rpc_queries{};
   uint64_t stage2_home_score_rpc_request_bytes{};
   uint64_t stage2_home_score_rpc_response_bytes{};
+  uint64_t stage2_score_home_wait_ns{};
+  uint64_t stage2_graph_home_wait_ns{};
+  uint64_t stage2_score_home_dispatches{};
+  uint64_t stage2_graph_home_dispatches{};
+  uint64_t stage2_dual_plane_dispatches{};
+  uint64_t stage2_dual_plane_waits{};
   std::array<uint64_t, kStage2TimingPhaseCount> stage2_phase_attempts{};
   std::array<uint64_t, kStage2TimingPhaseCount>
     stage2_phase_task_attempts{};
@@ -257,6 +269,9 @@ std::vector<MaintenanceLogCursor> snapshot_maintenance_logs(
 MaintenanceLogSummary summarize_maintenance_logs(
   const std::vector<MaintenanceLogCursor>& cursors,
   double observation_period_seconds = 5.0);
+
+MaintenanceLogSummary summarize_current_maintenance_logs(
+  const std::vector<std::string>& paths);
 
 MaintenanceLogSummary summarize_maintenance_log_window(
   const std::vector<MaintenanceLogCursor>& begin_cursors,

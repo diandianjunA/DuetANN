@@ -303,6 +303,45 @@ void test_relocation_is_versioned_and_idempotent() {
   assert(state.entry.placement_version == 12);
 }
 
+void test_committed_stage2_barrier_progresses_under_successor_lease() {
+  const RemotePtr inserted = pointer(3, 4096);
+  const RemotePtr relocated = pointer(4, 8192);
+  const detail::AuthorityOperationToken insert_operation{5, 0, 5001};
+  const detail::AuthorityOperationToken erase_operation{6, 0, 5002};
+  detail::AuthorityDirectoryState state;
+
+  assert(detail::begin_authority_mutation(
+           state, MutationKind::insert, insert_operation, 3).state ==
+         detail::AuthorityBeginState::prepared);
+  assert(detail::commit_authority_mutation(
+           state, insert_operation, inserted, 1, false, 901) ==
+         detail::AuthorityCommitState::committed);
+  const auto erase = detail::begin_authority_mutation(
+    state, MutationKind::erase, erase_operation, 3);
+  assert(erase.state == detail::AuthorityBeginState::prepared);
+  assert(state.lease.has_value());
+
+  assert(detail::relocate_authority_if_current(
+           state, insert_operation, 1, inserted, inserted, 1) ==
+         detail::AuthorityRelocateState::committed);
+  assert(state.entry.current == inserted);
+  assert(state.entry.placement_version == 1);
+  assert(state.lease.has_value());
+  assert(detail::relocate_authority_if_current(
+           state, erase_operation, 1, inserted, inserted, 1) ==
+         detail::AuthorityRelocateState::busy);
+  assert(detail::relocate_authority_if_current(
+           state, insert_operation, 1, inserted, relocated, 1) ==
+         detail::AuthorityRelocateState::busy);
+
+  assert(detail::commit_authority_mutation(
+           state, erase_operation, RemotePtr{}, 2, true, 902) ==
+         detail::AuthorityCommitState::committed);
+  assert(detail::relocate_authority_if_current(
+           state, insert_operation, 1, inserted, inserted, 1) ==
+         detail::AuthorityRelocateState::stale);
+}
+
 void test_cleanup_retirement_barrier_waits_for_linearization() {
   const RemotePtr base_generation = pointer(2, 4096);
   const RemotePtr successor_generation = pointer(4, 8192);
@@ -357,6 +396,7 @@ int main() {
   test_gen1_stage2_wins_before_gen2_begin();
   test_abort_releases_old_stage2_without_corrupting_directory();
   test_relocation_is_versioned_and_idempotent();
+  test_committed_stage2_barrier_progresses_under_successor_lease();
   test_cleanup_retirement_barrier_waits_for_linearization();
   return 0;
 }

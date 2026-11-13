@@ -7,7 +7,7 @@
 //            (the pre-optimization kPersistentRuntimePqSubquantizers path)
 //   mode 1 - per-candidate packed scorer over the global LUT
 //            (approximate_entry_aligned_packed)
-//   mode 2 - shared-memory LUT tile scoring, production helper
+//   mode 2 - shared-memory LUT tile scoring, standalone comparison helper
 //            (score_static_candidates_lut_tiled)
 //   mode 3 - tile staging + barriers only (no scoring; cost attribution)
 //   mode 4 - tile scoring, register partials + cached ordinals

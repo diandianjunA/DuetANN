@@ -450,7 +450,7 @@ bool HostOrchestratedSearchEngine::Impl::wait_for_maintenance(
   for (size_t shard = 0; shard < controls.size(); ++shard) {
     next[shard] = controls[shard].next_maintenance_sequence;
   }
-  const auto targets = maintenance_fence::capture_targets(
+  auto targets = maintenance_fence::capture_targets(
     target_sequences, next);
   if (effective_target_sequences != nullptr) {
     *effective_target_sequences = targets;
@@ -462,7 +462,16 @@ bool HostOrchestratedSearchEngine::Impl::wait_for_maintenance(
     std::vector<u64> observed(controls.size());
     for (size_t shard = 0; shard < controls.size(); ++shard) {
       observed[shard] = controls[shard].durable_maintenance_sequence;
-      complete = complete && observed[shard] >= targets[shard];
+      next[shard] = controls[shard].next_maintenance_sequence;
+      const auto latest_targets = maintenance_fence::capture_targets(
+        std::span<const u64>{targets}.first(shard + 1),
+        std::span<const u64>{next}.first(shard + 1));
+      targets[shard] = latest_targets[shard];
+      complete = complete && observed[shard] >= targets[shard] &&
+        observed[shard] >= next[shard] - 1;
+    }
+    if (effective_target_sequences != nullptr) {
+      *effective_target_sequences = targets;
     }
     if (durable_sequences != nullptr) *durable_sequences = observed;
     if (complete) return true;

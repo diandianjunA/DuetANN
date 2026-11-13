@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 
 #include "common/types.hh"
@@ -17,10 +19,24 @@ constexpr u32 kMutationCompletionMagic = 0x4d434d50;  // "MCMP"
 // replay identities.
 constexpr u32 kMutationProtocolVersion = 4;
 constexpr u32 kPeerRpcMagic = 0x53505250;  // "SPRP"
-// Version 16 adds leased certificate and Atomic Cut reconciliation operations.
+// Version 17 adds lease-preserving incremental stable-graph refinement.
 // Peers from older builds are rejected at the common header check rather than
-// silently interpreting a now-invalid flags bit.
-constexpr u32 kPeerRpcVersion = 16;
+// silently interpreting an unknown reconciliation operation.
+constexpr u32 kPeerRpcVersion = 17;
+
+inline std::atomic<bool>& mutation_completion_trace_requested() {
+  static std::atomic<bool> requested{false};
+  return requested;
+}
+
+inline bool mutation_completion_trace_enabled() {
+  return mutation_completion_trace_requested().load(std::memory_order_acquire) ||
+    std::getenv("DVSTOR_TRACE_MUTATION_COMPLETION") != nullptr;
+}
+
+inline void enable_mutation_completion_trace(int) {
+  mutation_completion_trace_requested().store(true, std::memory_order_release);
+}
 
 enum class InsertStatus : u32 {
   ok = 0,
@@ -381,6 +397,8 @@ enum class ReconcileReverseOpKind : u32 {
   acquire_certificate_lease = 6,
   release_certificate_lease = 7,
   remove_provisional_if_present = 8,
+  add_if_capacity = 9,
+  refine_add = 10,
 };
 
 struct ReconcileReverseOp {
@@ -397,8 +415,7 @@ struct ReconcileReverseOp {
 inline bool reconcile_reverse_op_valid(const ReconcileReverseOp& op) {
   return op.reserved == 0 &&
     op.kind >= static_cast<u32>(ReconcileReverseOpKind::replace_or_add) &&
-    op.kind <= static_cast<u32>(
-      ReconcileReverseOpKind::remove_provisional_if_present);
+    op.kind <= static_cast<u32>(ReconcileReverseOpKind::refine_add);
 }
 
 // These fields describe postconditions, except replaced which reports that
