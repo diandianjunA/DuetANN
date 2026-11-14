@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
@@ -63,17 +64,32 @@ ConfigMap read_config(const std::string& path) {
     throw std::runtime_error("failed to open config: " + path);
   }
 
-  ConfigMap config;
+  struct Entry {
+    std::string section;
+    std::string key;
+    std::string value;
+    size_t line;
+  };
+  std::vector<Entry> entries;
+  std::string section;
   std::string line;
   size_t line_number = 0;
   while (std::getline(input, line)) {
     ++line_number;
     const auto comment_pos = line.find_first_of("#;");
-    if (comment_pos != std::string::npos) {
-      line.erase(comment_pos);
-    }
+    if (comment_pos != std::string::npos) line.erase(comment_pos);
     line = trim(line);
-    if (line.empty()) {
+    if (line.empty()) continue;
+    if (line.front() == '[' || line.back() == ']') {
+      const bool valid_section = line.size() >= 3 &&
+        line.front() == '[' && line.back() == ']' &&
+        !trim(line.substr(1, line.size() - 2)).empty();
+      if (!valid_section) {
+        throw std::runtime_error(
+          "malformed section on line " + std::to_string(line_number) +
+          ": " + path);
+      }
+      section = trim(line.substr(1, line.size() - 2));
       continue;
     }
 
@@ -90,12 +106,94 @@ ConfigMap read_config(const std::string& path) {
         "empty config key on line " + std::to_string(line_number) +
         ": " + path);
     }
-    const auto [position, inserted] =
-      config.emplace(std::move(key), std::move(value));
+    entries.push_back({section, std::move(key), std::move(value), line_number});
+  }
+
+  const auto is_node_section = [](const std::string& name) {
+    return name.starts_with("compute:") || name.starts_with("storage:");
+  };
+  std::string selected_node;
+  bool has_node_sections = false;
+  for (const auto& entry : entries) {
+    if (is_node_section(entry.section)) {
+      has_node_sections = true;
+    } else if (entry.key == "node") {
+      selected_node = entry.value;
+    }
+  }
+  if (has_node_sections && selected_node.empty()) {
+    throw std::runtime_error(
+      "per-node sections require node=compute:N or node=storage:N: " + path);
+  }
+
+  ConfigMap config;
+  for (const auto& entry : entries) {
+    if (is_node_section(entry.section)) continue;
+    const auto [position, inserted] = config.emplace(entry.key, entry.value);
     if (!inserted) {
       throw std::runtime_error(
-        "duplicate config key on line " + std::to_string(line_number) +
+        "duplicate config key on line " + std::to_string(entry.line) +
         ": " + position->first);
+    }
+  }
+  if (!selected_node.empty()) {
+    ConfigMap overridden;
+    bool found = false;
+    for (const auto& entry : entries) {
+      if (entry.section != selected_node) continue;
+      found = true;
+      if (!overridden.emplace(entry.key, entry.value).second) {
+        throw std::runtime_error(
+          "duplicate per-node key on line " + std::to_string(entry.line) +
+          ": " + entry.key);
+      }
+      config[entry.key] = entry.value;
+    }
+    if (!found) {
+      throw std::runtime_error("no section for selected node " + selected_node);
+    }
+  }
+  std::map<u32, std::map<std::string, std::string>> storage_topology;
+  std::map<u32, std::map<std::string, std::string>> compute_topology;
+  for (const auto& entry : entries) {
+    if (!is_node_section(entry.section) ||
+        (entry.key != "host" && entry.key != "port")) continue;
+    const auto separator = entry.section.find(':');
+    const u32 index = static_cast<u32>(std::stoul(
+      entry.section.substr(separator + 1)));
+    auto& node = entry.section.starts_with("storage:")
+      ? storage_topology[index] : compute_topology[index];
+    node[entry.key] = entry.value;
+  }
+  const auto join_endpoints = [](const auto& topology) {
+    std::string result;
+    for (const auto& [index, fields] : topology) {
+      const auto host = fields.find("host");
+      const auto port = fields.find("port");
+      if (host == fields.end() || port == fields.end()) continue;
+      if (!result.empty()) result += ' ';
+      result += host->second + ":" + port->second;
+    }
+    return result;
+  };
+  if (!config.contains("servers")) config["servers"] = join_endpoints(storage_topology);
+  if (!config.contains("storage-peers")) {
+    config["storage-peers"] = join_endpoints(storage_topology);
+  }
+  if (!config.contains("clients")) {
+    const auto initiator = config.find("initiator");
+    const bool derive_clients = initiator != config.end() &&
+      (initiator->second == "true" || initiator->second == "1");
+    if (derive_clients) {
+      std::map<u32, std::map<std::string, std::string>> other_compute;
+      for (const auto& [index, fields] : compute_topology) {
+        if ("compute:" + std::to_string(index) != selected_node) {
+          other_compute[index] = fields;
+        }
+      }
+      config["clients"] = join_endpoints(other_compute);
+    } else {
+      config["clients"] = "";
     }
   }
   return config;
@@ -137,8 +235,9 @@ std::vector<std::string> build_service_argv(const std::string& service_config_pa
 
   static const std::vector<std::string> multi_keys = {"servers", "clients", "storage-peers"};
   static const std::vector<std::string> flag_keys = {
-    "initiator", "disable-thread-pinning"};
-  static const std::vector<std::string> benchmark_only_keys = {"insert-start-id", "write-id-base"};
+    "is-server", "initiator", "disable-thread-pinning"};
+  static const std::vector<std::string> benchmark_only_keys = {
+    "insert-start-id", "write-id-base", "node", "host"};
 
   for (const auto& [key, value] : config) {
     if (std::find(benchmark_only_keys.begin(), benchmark_only_keys.end(), key) != benchmark_only_keys.end()) {

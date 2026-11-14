@@ -1,8 +1,8 @@
 #pragma once
 
 #include "gpu_search/persistent_kernel.hh"
-#include "gpu_search/persistent_kernel/warp_bitonic_sort.cuh"
-#include "gpu_search/persistent_kernel/warp_reduction.cuh"
+#include "gpu_search/persistent_kernel/merge/warp_bitonic_sort.cuh"
+#include "gpu_search/persistent_kernel/merge/warp_reduction.cuh"
 
 #include <cuda_runtime.h>
 #include <cub/block/block_radix_sort.cuh>

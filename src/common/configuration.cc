@@ -1,8 +1,11 @@
 #include "common/configuration.hh"
 
+#include <optional>
+
 namespace configuration {
 
   IndexConfiguration::IndexConfiguration(int argc, char** argv) {
+    resolve_contribution_profile(argc, argv);
     add_options();
     const bool graph_read_policy_explicit = command_line_has_option(
       argc, argv, "--gpu-query-graph-read-policy");
@@ -27,11 +30,155 @@ namespace configuration {
     query_rdma_trace_mode = normalize_mode(query_rdma_trace_mode);
     storage_owner_update_completion_mode =
       normalize_mode(storage_owner_update_completion_mode);
+    relax_contribution_overrides(argc, argv);
     resolve_feature_bundles(
       argc, argv, graph_read_policy_explicit, dynamic_graph_extent_explicit,
       graph_issue_width_explicit, beam_merge_policy_explicit);
     validate(argv);
     operator<<(std::cerr, *this);
+  }
+
+  void IndexConfiguration::resolve_contribution_profile(
+      int argc, char** argv) {
+    const auto read_option = [&](const char* option) -> std::optional<str> {
+      const str name{option};
+      for (int index = 1; index < argc; ++index) {
+        if (argv[index] == nullptr) continue;
+        const str argument{argv[index]};
+        if (argument == name && index + 1 < argc && argv[index + 1] != nullptr) {
+          return str{argv[index + 1]};
+        }
+        if (argument.starts_with(name + "=")) {
+          return argument.substr(name.size() + 1);
+        }
+      }
+      return std::nullopt;
+    };
+    if (const auto value = read_option("--profile")) profile = *value;
+    if (const auto value = read_option("--c1")) c1 = *value;
+    if (const auto value = read_option("--c2")) c2 = *value;
+    if (const auto value = read_option("--c3")) c3 = *value;
+    if (const auto value = read_option("--gpu-graph-commit-width")) {
+      gpu_graph_commit_width = static_cast<u32>(std::stoul(*value));
+    }
+
+    profile = normalize_mode(profile);
+    c1 = normalize_mode(c1);
+    c2 = normalize_mode(c2);
+    c3 = normalize_mode(c3);
+    const bool valid_profile =
+      profile == "custom" || profile == "baseline" || profile == "full";
+    const bool valid_switches =
+      (c1 == "auto" || c1 == "on" || c1 == "off") &&
+      (c2 == "auto" || c2 == "on" || c2 == "off") &&
+      (c3 == "auto" || c3 == "on" || c3 == "off");
+    if (!valid_profile || !valid_switches) {
+      record_feature_bundle_conflict(
+        "--profile must be custom, baseline, or full; --c1/--c2/--c3 "
+        "must be auto, on, or off");
+      return;
+    }
+    const bool custom = profile == "custom";
+    if (custom && c1 == "auto" && c2 == "auto" && c3 == "auto") return;
+    native_profile_active_ = true;
+
+    const bool full_by_default = custom || profile == "full";
+    const bool c1_enabled = c1 == "auto" ? full_by_default : c1 == "on";
+    const bool c2_enabled = c2 == "auto" ? full_by_default : c2 == "on";
+    const bool c3_enabled = c3 == "auto" ? full_by_default : c3 == "on";
+    c1 = c1_enabled ? "on" : "off";
+    c2 = c2_enabled ? "on" : "off";
+    c3 = c3_enabled ? "on" : "off";
+
+    // C1 owns update optimizations; baseline retains only update offload.
+    storage_owner_update_completion_mode = c1_enabled ? "decoupled" : "coupled";
+    storage_owner_batch_max_wait_us = c1_enabled ? 10'000 : 0;
+    storage_owner_stage2_batch_max_wait_us = c1_enabled ? 25'000 : 0;
+    storage_owner_stage2_score_many = c1_enabled;
+    storage_owner_stage2_home_rpc_combining = c1_enabled;
+    storage_owner_stage2_split_plane = c1_enabled;
+    storage_owner_lease_merge = c1_enabled;
+    storage_owner_stage2_graph_issue_width = c1_enabled ? 16 : 1;
+    storage_owner_repair_deadline_ms = c1_enabled ? 1000 : 0;
+    storage_owner_reverse_coalesce_max = c1_enabled ? 256 : 1;
+
+    // C2 owns adaptive graph transfer and its bootstrap hints.
+    dynamic_graph_access_mode = c2_enabled ? "adaptive" : "fixed";
+    gpu_query_graph_read_policy = c2_enabled ? "live-extent" : "fixed";
+    gpu_dynamic_graph_extent = c2_enabled;
+    gpu_dynamic_graph_extent_hints = c2_enabled;
+
+    // C3 owns GPU query optimizations; disabling it uses the plain legacy path.
+    if (!read_option("--gpu-graph-commit-width")) gpu_graph_commit_width = 16;
+    gpu_rdma_search_progression_mode = c3_enabled ? "decoupled" : "manual";
+    gpu_exact_frontier_early_issue = c3_enabled;
+    gpu_query_beam_merge_policy = c3_enabled ? "stable-run" : "legacy";
+    gpu_graph_issue_width = c3_enabled ? 32 : gpu_graph_commit_width;
+    gpu_terminal_exact_prefetch = false;
+  }
+
+  void IndexConfiguration::relax_contribution_overrides(
+      int argc, char** argv) {
+    if (!native_profile_active_) return;
+    const auto overridden = [&](const char* option, bool different) {
+      return different && command_line_has_option(argc, argv, option);
+    };
+    const bool c1_on = c1 == "on";
+    if (overridden("--storage-owner-update-completion-mode",
+                   storage_owner_update_completion_mode !=
+                     (c1_on ? "decoupled" : "coupled")) ||
+        overridden("--storage-owner-batch-max-wait-us",
+                   storage_owner_batch_max_wait_us != (c1_on ? 10'000 : 0)) ||
+        overridden("--storage-owner-stage2-batch-max-wait-us",
+                   storage_owner_stage2_batch_max_wait_us !=
+                     (c1_on ? 25'000 : 0)) ||
+        overridden("--storage-owner-stage2-score-many",
+                   storage_owner_stage2_score_many != c1_on) ||
+        overridden("--storage-owner-stage2-home-rpc-combining",
+                   storage_owner_stage2_home_rpc_combining != c1_on) ||
+        overridden("--storage-owner-stage2-split-plane",
+                   storage_owner_stage2_split_plane != c1_on) ||
+        overridden("--storage-owner-lease-merge",
+                   storage_owner_lease_merge != c1_on) ||
+        overridden("--storage-owner-stage2-graph-issue-width",
+                   storage_owner_stage2_graph_issue_width !=
+                     (c1_on ? 16 : 1)) ||
+        overridden("--storage-owner-repair-deadline-ms",
+                   storage_owner_repair_deadline_ms != (c1_on ? 1000 : 0)) ||
+        overridden("--storage-owner-reverse-coalesce-max",
+                   storage_owner_reverse_coalesce_max != (c1_on ? 256 : 1))) {
+      c1 = "custom";
+    }
+
+    const bool c2_on = c2 == "on";
+    if (overridden("--gpu-dynamic-graph-access-mode",
+                   dynamic_graph_access_mode != (c2_on ? "adaptive" : "fixed")) ||
+        overridden("--gpu-query-graph-read-policy",
+                   gpu_query_graph_read_policy !=
+                     (c2_on ? "live-extent" : "fixed")) ||
+        overridden("--gpu-dynamic-graph-extent",
+                   gpu_dynamic_graph_extent != c2_on) ||
+        overridden("--gpu-dynamic-graph-extent-hints",
+                   gpu_dynamic_graph_extent_hints != c2_on)) {
+      c2 = "custom";
+    }
+
+    const bool c3_on = c3 == "on";
+    if (overridden("--gpu-rdma-search-progression-mode",
+                   gpu_rdma_search_progression_mode !=
+                     (c3_on ? "decoupled" : "manual")) ||
+        overridden("--gpu-exact-frontier-early-issue",
+                   gpu_exact_frontier_early_issue != c3_on) ||
+        overridden("--gpu-query-beam-merge-policy",
+                   gpu_query_beam_merge_policy !=
+                     (c3_on ? "stable-run" : "legacy")) ||
+        overridden("--gpu-graph-issue-width",
+                   gpu_graph_issue_width !=
+                     (c3_on ? 32 : gpu_graph_commit_width)) ||
+        overridden("--gpu-terminal-exact-prefetch",
+                   gpu_terminal_exact_prefetch)) {
+      c3 = "custom";
+    }
   }
 
   void IndexConfiguration::resolve_feature_bundles(
@@ -40,7 +187,7 @@ namespace configuration {
       bool dynamic_graph_extent_explicit,
       bool graph_issue_width_explicit,
       bool beam_merge_policy_explicit) {
-    if (dynamic_graph_access_mode == "fixed") {
+    if (c2 != "custom" && dynamic_graph_access_mode == "fixed") {
       if (graph_read_policy_explicit &&
           gpu_query_graph_read_policy != "fixed") {
         record_feature_bundle_conflict(
@@ -54,7 +201,7 @@ namespace configuration {
       }
       gpu_query_graph_read_policy = "fixed";
       gpu_dynamic_graph_extent = false;
-    } else if (dynamic_graph_access_mode == "adaptive") {
+    } else if (c2 != "custom" && dynamic_graph_access_mode == "adaptive") {
       if (graph_read_policy_explicit &&
           gpu_query_graph_read_policy != "live-extent") {
         record_feature_bundle_conflict(
@@ -71,9 +218,9 @@ namespace configuration {
     }
 
     const bool coupled_progression =
-      gpu_rdma_search_progression_mode == "coupled";
+      c3 != "custom" && gpu_rdma_search_progression_mode == "coupled";
     const bool decoupled_progression =
-      gpu_rdma_search_progression_mode == "decoupled";
+      c3 != "custom" && gpu_rdma_search_progression_mode == "decoupled";
     if (coupled_progression) {
       if (graph_issue_width_explicit && gpu_graph_issue_width != 0 &&
           gpu_graph_issue_width != gpu_graph_commit_width) {
@@ -123,15 +270,6 @@ namespace configuration {
         }
         gpu_query_beam_merge_policy = "stable-run";
         gpu_exact_frontier_early_issue = true;
-      } else if (coupled_progression) {
-        if (command_line_has_option(
-              argc, argv, "--gpu-exact-frontier-early-issue") &&
-            gpu_exact_frontier_early_issue) {
-          record_feature_bundle_conflict(
-            "--gpu-rdma-search-progression-mode=coupled conflicts with "
-            "--gpu-exact-frontier-early-issue=true");
-        }
-        gpu_exact_frontier_early_issue = false;
       }
     }
 
@@ -143,7 +281,7 @@ namespace configuration {
           " conflicts with " + option);
       }
     };
-    if (storage_owner_update_completion_mode == "decoupled") {
+    if (c1 != "custom" && storage_owner_update_completion_mode == "decoupled") {
       require_update_switch("--storage-owner-stage2-score-many",
                             storage_owner_stage2_score_many, true, "decoupled");
       require_update_switch("--storage-owner-stage2-home-rpc-combining",
@@ -177,7 +315,8 @@ namespace configuration {
       if (storage_owner_repair_deadline_ms == 0) {
         storage_owner_repair_deadline_ms = 1000;
       }
-    } else if (storage_owner_update_completion_mode == "coupled") {
+    } else if (c1 != "custom" &&
+               storage_owner_update_completion_mode == "coupled") {
       require_update_switch("--storage-owner-stage2-score-many",
                             storage_owner_stage2_score_many, false, "coupled");
       require_update_switch("--storage-owner-stage2-home-rpc-combining",
@@ -199,6 +338,14 @@ namespace configuration {
 
   void IndexConfiguration::add_options() {
     desc.add_options()
+      ("profile", po::value<str>(&profile)->default_value(profile),
+       "Native system profile: custom, baseline, or full.")
+      ("c1", po::value<str>(&c1)->default_value(c1),
+       "C1 update optimizations: auto, on, or off.")
+      ("c2", po::value<str>(&c2)->default_value(c2),
+       "C2 adaptive graph-transfer optimizations: auto, on, or off.")
+      ("c3", po::value<str>(&c3)->default_value(c3),
+       "C3 GPU query optimizations: auto, on, or off.")
       ("index-prefix", po::value<filepath_t>(&index_prefix),
        "Prefix shared by metadata, graph shards, PQ model, and PQ code shards.")
       ("server-index-file", po::value<filepath_t>(&server_index_file),
@@ -555,6 +702,10 @@ namespace configuration {
         gpu_query_beam_merge_policy != "stable-run") {
       fail("--gpu-query-beam-merge-policy must be legacy or stable-run");
     }
+    if (gpu_rdma_search_progression_mode == "decoupled" &&
+        gpu_graph_issue_width <= gpu_graph_commit_width) {
+      fail("decoupled GPU query progression requires issue width > commit width");
+    }
     if (storage_owner_update_completion_mode != "coupled" &&
         storage_owner_update_completion_mode != "decoupled" &&
         storage_owner_update_completion_mode != "manual") {
@@ -656,6 +807,9 @@ std::ostream& operator<<(
              << config.vector_data_type << '\n';
       output << std::setfill('-') << std::setw(line_width) << "" << '\n';
       output << std::setfill(' ');
+      output << std::setw(width) << "system profile: " << config.profile << '\n';
+      output << std::setw(width) << "C1/C2/C3: "
+             << config.c1 << "/" << config.c2 << "/" << config.c3 << '\n';
       const bool persistent_gpu_engine =
         config.gpu_rdma_search_progression_mode != "coupled";
       output << std::setw(width) << "query engine: "

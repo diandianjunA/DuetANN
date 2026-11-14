@@ -1,0 +1,127 @@
+include_guard(GLOBAL)
+
+set(DVSTOR_MEMORY_NODE_SOURCES
+    src/common/configuration.cc
+    src/gpu_search/index_format.cc
+    src/gpu_search/pq_index.cc
+    src/memory_node/memory_node.cc
+    src/memory_node/centroid_routing.cc
+    src/memory_node/peer_rdma.cc
+    src/memory_node/peer_rpc/client_requests.cc
+    src/memory_node/peer_rpc/physical_control.cc
+    src/memory_node/peer_rpc/request_handlers.cc
+    src/memory_node/peer_rpc/runtime.cc
+    src/memory_node/peer_rpc/stage1_requests.cc
+    src/memory_node/peer_rpc/stage2_requests.cc
+    src/memory_node/peer_rpc/workers.cc
+    src/memory_node/storage_owner_index/allocation.cc
+    src/memory_node/storage_owner_index/partition_local_search.cc
+    src/memory_node/storage_owner_index/candidate_search.cc
+    src/memory_node/storage_owner_index/candidate_search_async.cc
+    src/memory_node/storage_owner_index/graph_access.cc
+    src/memory_node/storage_owner_index/graph_snapshot.cc
+    src/memory_node/storage_owner_index/graph_publication.cc
+    src/memory_node/storage_owner_index/graph_mutation.cc
+    src/memory_node/storage_owner_index/lease_merge.cc
+    src/memory_node/storage_owner_index/reconcile_reverse.cc
+    src/memory_node/storage_owner_index/reverse_batch.cc
+    src/memory_node/storage_owner_maintenance/graph_tasks.cc
+    src/memory_node/storage_owner_maintenance/queue.cc
+    src/memory_node/storage_owner_maintenance/runtime.cc
+    src/memory_node/storage_owner_maintenance/scheduling.cc
+    src/memory_node/storage_owner_maintenance/worker.cc
+    src/memory_node/storage_owner_maintenance/worker_loop.cc
+    src/memory_node/storage_owner_maintenance/worker_reverse.cc
+    src/memory_node/storage_owner_maintenance/worker_search.cc
+    src/memory_node/storage_owner_maintenance/worker_reconcile.cc
+    src/memory_node/storage_owner_maintenance/worker_prepare.cc
+    src/memory_node/storage_owner_maintenance/worker_finalize.cc
+    src/memory_node/storage_owner_runtime/batch_execution.cc
+    src/memory_node/storage_owner_runtime/exact_execution.cc
+    src/memory_node/storage_owner_runtime/lifecycle.cc
+    src/memory_node/storage_owner_runtime/wire_protocol.cc
+    src/memory_node/storage_owner_runtime/workers.cc
+    src/vamana/centroid_router.cc
+)
+
+set(DVSTOR_OFFLINE_BUILDER_SOURCES
+    tools/vamana_offline/checkpoint.cc
+    tools/vamana_offline/config.cc
+    tools/vamana_offline/dataset_io.cc
+    tools/vamana_offline/graph.cc
+    tools/vamana_offline/partitioning.cc
+    tools/vamana_offline/progress.cc
+    tools/vamana_offline/recall_check.cc
+    tools/vamana_offline/shard_writer.cc
+)
+
+set(DVSTOR_PQ_INDEXER_SOURCES
+    src/gpu_search/index_format.cc
+    src/gpu_search/pq_index.cc
+    tools/vamana_offline/pq_indexer.cc
+    tools/vamana_offline/progress.cc
+)
+
+set(DVSTOR_GRAPH_EXTENT_INDEXER_SOURCES
+    src/gpu_search/index_format.cc
+    tools/vamana_offline/graph_extent_indexer.cc
+    tools/vamana_offline/progress.cc
+)
+
+set(DVSTOR_BREAKDOWN_SUPPORT_SOURCES
+    tools/breakdown_benchmark/dataset.cc
+    tools/breakdown_benchmark/maintenance_log.cc
+    tools/breakdown_benchmark/report.cc
+)
+
+set(DVSTOR_BREAKDOWN_BENCHMARK_SOURCES
+    tools/breakdown_benchmark/args.cc
+    tools/breakdown_benchmark/progress.cc
+    tools/breakdown_benchmark/workload.cc
+)
+
+set(DVSTOR_METIS_REPARTITIONER_SOURCES
+    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/metis_repartitioner.cc
+    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/checkpoint.cc
+    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/dataset_io.cc
+    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/graph.cc
+    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/partitioning.cc
+    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/progress.cc
+    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/shard_writer.cc
+    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/pq_indexer.cc
+    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/graph_extent_indexer.cc
+    ${DVSTOR_SOURCE_ROOT}/src/service/index_metadata.cc
+    ${DVSTOR_SOURCE_ROOT}/src/gpu_search/index_format.cc
+    ${DVSTOR_SOURCE_ROOT}/src/gpu_search/pq_index.cc
+)
+
+set(DVSTOR_RUNTIME_SOURCES
+    src/common/configuration.cc
+    src/common/core_assignment.cc
+    src/common/timing.cc
+    src/gpu_search/navigation_bootstrapper.cc
+    src/gpu_search/index_format.cc
+    src/gpu_search/host_orchestrated_engine.cc
+    src/gpu_search/host_orchestrated_engine/control.cc
+    src/gpu_search/host_orchestrated_engine/query.cc
+    src/gpu_search/persistent_engine.cc
+    src/gpu_search/persistent_engine/completion.cc
+    src/gpu_search/persistent_engine/construction.cc
+    src/gpu_search/persistent_engine/centroid_route_publication.cc
+    src/gpu_search/persistent_engine/health.cc
+    src/gpu_search/persistent_engine/lifecycle.cc
+    src/gpu_search/persistent_engine/query_execution.cc
+    src/gpu_search/persistent_engine/routing.cc
+    src/gpu_search/persistent_engine/storage_reclaim.cc
+    src/gpu_search/pq_index.cc
+    src/gpu_search/types.cc
+    src/service/compute_service/index_commands.cc
+    src/service/compute_service/lifecycle.cc
+    src/service/compute_service/search.cc
+    src/service/compute_service/storage_owner/completion.cc
+    src/service/compute_service/storage_owner/flow_control.cc
+    src/service/compute_service/storage_owner/lifecycle.cc
+    src/service/compute_service/storage_owner/public_mutations.cc
+    src/service/compute_service/storage_owner/sender.cc
+    src/service/index_metadata.cc
+)

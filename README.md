@@ -96,17 +96,49 @@ PQ 数据；HostOrchestrated 每次读取动态 PQ 到主机 scratch，再复制
 公共参数位于 `experiment/sift100m/common.conf`，`baseline.conf` 与 `full.conf` 只覆盖研究开关；
 运行器会在输出目录保存合成后的完整配置。
 
+## 原生系统 profile
+
+运行时直接支持 `profile = baseline|full|custom` 和 `c1|c2|c3 = auto|on|off`，
+在命令行中对应 `--profile`、`--c1`、`--c2`、`--c3`。全关等价于 baseline，
+全开等价于 full；单项开关不会改变另外两项贡献。profile 只提供默认值，显式底层
+参数最后生效；覆盖后的对应贡献标记为 `custom`，不会强制改回 profile 值。
+默认 `custom` 且三个开关为 `auto`，因此旧配置和手动底层参数保持原行为。
+
+- C1：两阶段更新、更新批处理、Stage2 合并、LeaseMerge 和反向更新合并。
+- C2：Live/DynaExtent 自适应图传输及其冷启动提示。
+- C3：前沿解耦、Stable-Run、提前发起和对应 issue width。
+
+`config/profiles/` 提供 baseline、full 和 C1/C2/C3 独立开关的原生 INI 示例。
+每个示例都使用 `[profile]`、`[index]`、`[cluster]`、`[transport]`、`[gpu]`、
+`[C1:update]`、`[C2:transfer]`、`[C3:query]` 等标题分组，并列出全部 92 个运行时
+字段。每个字段都有中文解释注释。普通分组标题只负责组织，不改变字段名；
+`[compute:N]` 和 `[storage:N]` 则提供逐节点覆盖，由集群段的 `node = compute:N`
+或 `node = storage:N` 选择，选中节点段的参数最后生效。各节点的 `host`/`port`
+是拓扑的唯一来源，`servers`、`storage-peers` 和所需的 `clients` 会自动派生。
+公共分组中的重复字段以及同一节点段中的重复字段都会被拒绝。需要完全手动控制时
+也可使用 `profile = custom`。
+基准输入路径和测量时长仍由 benchmark 参数单独控制。
+
 ## 源码导航
 
-- `src/gpu_search/persistent_kernel/`：Persistent 查询状态机、Stable-Run、精确前沿证书、
-  GPUNetIO transport、图 extent 与 ROB I/O。`query_traversal.cuh` 是主状态机，其余文件按
-  评分、证书、frontier 和记录类型拆分。
+- `src/gpu_search/persistent_kernel/`：按 `query/`、`frontier/`、`merge/`、`io/`
+  划分 Persistent 查询状态机、前沿证书、Beam 合并和 RDMA I/O；公共上下文与
+  kernel 入口保留在根目录。
+- `tools/`：按 `breakdown_benchmark/`、`long_insert_recall/`、`probes/` 和
+  `vamana_offline/` 组织工具入口与实现。
+- `test/`：按 `core/`、`offline/`、`benchmark/`、`runtime/`、`storage_owner/`、
+  `gpu/` 组织测试，根目录的同名 CMake 模块负责对应注册。
+- `src/memory_node/memory_node.cc`：存储节点生命周期和索引加载；`centroid_routing.cc`
+  负责中心路由恢复、发布与成员更新。
 - `src/memory_node/peer_rpc/`：Stage1 与 Stage2 RPC handler。
 - `src/memory_node/storage_owner_index/`：局部搜索、同步/异步 continuation、图快照与发布。
-- `src/memory_node/storage_owner_maintenance/`：维护队列与 `Stage2Worker`；
-  `worker_search.cc`、`worker_reconcile.cc`、`worker_prepare.cc`、`worker_finalize.cc`
-  分别负责搜索、反向协调、图准备和收尾。
+- `src/memory_node/storage_owner_maintenance/`：维护队列、执行器唤醒/搜索租约调度与
+  `Stage2Worker`；`scheduling.cc` 独立实现调度原语，`worker_search.cc`、
+  `worker_reconcile.cc`、`worker_prepare.cc`、`worker_finalize.cc` 分别负责搜索、
+  反向协调、图准备和收尾。
 - `src/common/configuration.hh/.cc`：配置字段、解析与校验。
+- `cmake/`：构建选项、工具链、依赖检测、源码清单及各类目标的独立模块；根
+  `CMakeLists.txt` 只负责配置顺序和目标编排。
 - `experiment/common/`：实验配置合成与报告公共逻辑；集群专用编排仍留在各实验目录。
 
 ## 验证与开发

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "gpu_search/persistent_kernel/query_traversal.cuh"
+#include "gpu_search/persistent_kernel/query/query_traversal.cuh"
 
 namespace gpu_search::persistent_kernel_detail {
 

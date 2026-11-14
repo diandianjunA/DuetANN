@@ -49,6 +49,12 @@ public:
   u32 gpu_bootstrap_window_mb{64};
   u32 gpu_bootstrap_windows{2};
   u32 gpu_graph_commit_width{32};
+  // Native system profiles. Custom preserves the legacy defaults and all
+  // lower-level switches; baseline/full set every contribution at once.
+  str profile{"custom"};
+  str c1{"auto"};
+  str c2{"auto"};
+  str c3{"auto"};
   // Zero selects the workspace/beam-limited speculative issue cap.
   u32 gpu_graph_issue_width{};
   // Contribution-level graph-access mode. "manual" keeps the lower-level
@@ -207,6 +213,7 @@ public:
 
 private:
   str feature_bundle_conflict_;
+  bool native_profile_active_{};
 
   static bool command_line_has_option(
       int argc, char** argv, std::string_view option) {
@@ -228,6 +235,9 @@ private:
       feature_bundle_conflict_ = message;
     }
   }
+
+  void resolve_contribution_profile(int argc, char** argv);
+  void relax_contribution_overrides(int argc, char** argv);
 
   void resolve_feature_bundles(
       int argc, char** argv,
