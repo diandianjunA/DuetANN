@@ -2,6 +2,12 @@
 #include "memory_node/storage_owner_maintenance/cleanup_policy.hh"
 #include "memory_node/storage_owner_index/vector_snapshot_policy.hh"
 
+#include <atomic>
+#include <cstdlib>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
 using namespace memory_node_storage_owner_maintenance_detail;
 using memory_node_storage_owner_index_detail::IncarnationLockResult;
 using memory_node_storage_owner_index_detail::StableNodeSnapshotState;
@@ -128,8 +134,8 @@ vec<RemotePtr> MemoryNode::read_preserved_neighbor_list(RemotePtr rptr) {
                rptr.incarnation(),
              "preserved adjacency incarnation mismatch: raw=" +
                std::to_string(rptr.raw_address));
-  lib_assert(vamana::hot_graph::load_u32_le(entry.data() + 12) == 0,
-             "preserved adjacency reserved field is nonzero: raw=" +
+  lib_assert((vamana::hot_graph::load_u32_le(entry.data() + 12) & 1u) == 0,
+             "preserved adjacency publication is incomplete: raw=" +
                std::to_string(rptr.raw_address));
   vec<RemotePtr> neighbors;
   neighbors.reserve(edge_count);
@@ -233,6 +239,19 @@ bool MemoryNode::remove_local_neighbors_identity_fenced(
     span<const service::storage_owner::ReverseUpdateOp> ops,
     const Configuration& config) {
   using service::storage_owner::ReverseUpdateOp;
+  const auto debug_failure = [&](const char* reason, RemotePtr target,
+                                 u64 header) {
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") == nullptr) return;
+    static std::mutex debug_mutex;
+    static std::unordered_map<u64, u32> debug_counts;
+    std::lock_guard<std::mutex> debug_lock(debug_mutex);
+    const u32 count = ++debug_counts[target.raw_address];
+    if (count > 16 && (count & (count - 1)) != 0) return;
+    std::cerr << std::string("[cleanup-apply-debug] self=") +
+      std::to_string(storage_id_) + " reason=" + reason + " target=" +
+      std::to_string(target.raw_address) + " header=" +
+      std::to_string(header) << std::endl;
+  };
   if (ops.empty()) return true;
 
   // Candidate identity is not encoded in graph edges, so validate every
@@ -244,10 +263,26 @@ bool MemoryNode::remove_local_neighbors_identity_fenced(
   for (const ReverseUpdateOp& op : ops) {
     const RemotePtr target{op.target_raw};
     const RemotePtr candidate{op.candidate_raw};
-    if (!valid_local_storage_node_pointer(target) || candidate.is_null() ||
+    if (target.is_null() || !target.is_well_formed() ||
+        !local_shard(target.memory_node()) ||
+        !storage_node_pointer_addressable(target) || candidate.is_null() ||
         candidate.memory_node() >= num_storage_nodes_) {
-      // Malformed traffic is a protocol failure. A well-formed but stale
-      // identity below is instead an idempotent no-op/ACK.
+      debug_failure("invalid_pointer", target, 0);
+      return false;
+    }
+    if (!valid_local_storage_node_pointer(target)) {
+      const u64 header = load_local_node_header_acquire(target);
+      const u32 slot_incarnation = *reinterpret_cast<const u32*>(
+        index_buffer_.get_full_buffer() + target.byte_offset() +
+        VamanaNode::offset_slot_incarnation());
+      if (memory_node_storage_owner_maintenance_detail::
+            cleanup_reverse_target_is_reclaimed(
+              target.incarnation(), header, slot_incarnation)) {
+        // The old tagged adjacency is gone. Never edit its replacement; the
+        // old removal has already reached its idempotent postcondition.
+        continue;
+      }
+      debug_failure("invalid_pointer", target, header);
       return false;
     }
     candidates.push_back(candidate);
@@ -292,7 +327,11 @@ bool MemoryNode::remove_local_neighbors_identity_fenced(
       // edit.  Treat absence as the idempotent cleanup postcondition.
       continue;
     }
-    if (target_lock == IncarnationLockResult::busy) return false;
+    if (target_lock == IncarnationLockResult::busy) {
+      debug_failure("target_lock_busy", target,
+                    load_local_node_header_acquire(target));
+      return false;
+    }
     const byte_t* record = index_buffer_.get_full_buffer() +
       target.byte_offset();
     const u64 header = load_local_node_header_acquire(target);
@@ -301,15 +340,17 @@ bool MemoryNode::remove_local_neighbors_identity_fenced(
     const u32 observed_generation = *reinterpret_cast<const u32*>(
       record + VamanaNode::offset_generation());
     const ReverseUpdateOp& identity = *removals.front();
-    if ((header & VamanaNode::HEADER_RETIRING) != 0) {
-      // This target has already stopped accepting graph mutations and will
-      // itself be tombstoned only after its protected children are handed
-      // off. Treat removal as complete; mutating its preserved adjacency
+    if (memory_node_storage_owner_maintenance_detail::
+          cleanup_reverse_target_is_terminal(header)) {
+      // This target has already stopped accepting graph mutations or has been
+      // tombstoned. Treat removal as complete; mutating its preserved adjacency
       // would race that cleanup snapshot without improving live reachability.
+      // In particular, DELETED|STAGE2_FROZEN is terminal, not a retryable lock.
       unlock_node(target);
       continue;
     }
     if (VamanaNode::graph_mutation_quiesced(header)) {
+      debug_failure("graph_quiesced", target, header);
       unlock_node(target);
       return false;
     }
@@ -334,6 +375,7 @@ bool MemoryNode::remove_local_neighbors_identity_fenced(
     }
     GraphAdjacency adjacency;
     if (!read_graph_adjacency(target, adjacency)) {
+      debug_failure("adjacency_read", target, header);
       unlock_node(target);
       return false;
     }

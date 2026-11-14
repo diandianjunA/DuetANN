@@ -353,6 +353,12 @@ bool MemoryNode::try_enqueue_peer_reverse_update_response(
   if (log_index < 16) {
     std::cerr << "[storage-peer] bounded response queue full; "
               << "dropping retry-safe response"
+              << " self=" << storage_id_
+              << " destination=" << response.destination_shard
+              << " request_id=" << response.header.request_id
+              << " type=" << response.header.type
+              << " items=" << response.header.item_count
+              << " status=" << response.header.status
               << std::endl;
   }
   return false;

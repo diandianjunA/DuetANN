@@ -324,6 +324,7 @@ private:
   bool poll_owned_reverse_aggregates();
   bool form_reverse_aggregates();
   bool post_owned_reverse_aggregates();
+  void log_reverse_send_snapshot(u32 peer, u64 request_id, u32 item_count);
   bool drive_reverse_outbox();
   bool drain_reverse_completions();
   Stage2SearchAdvanceResult prepare_local(Stage2Context& context);

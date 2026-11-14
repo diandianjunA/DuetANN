@@ -257,6 +257,17 @@ void test_transient_node_snapshot_is_retryable_not_terminal() {
   assert(detail::classify_physical_node_snapshot(
            pointer, provisional, provisional, pointer.incarnation()) ==
          StableNodeSnapshotState::stable);
+  const u64 locked_replacement = VamanaNode::make_header(
+    pointer.incarnation() + 1, VamanaNode::HEADER_NODE_LOCK);
+  assert(detail::classify_physical_node_snapshot(
+           pointer, locked_replacement, locked_replacement,
+           pointer.incarnation()) == StableNodeSnapshotState::terminal);
+  assert(detail::classify_physical_node_snapshot(
+           pointer, locked_replacement, locked_replacement, 0) ==
+         StableNodeSnapshotState::terminal);
+  assert(detail::classify_physical_node_snapshot(
+           pointer, stable, locked_replacement, pointer.incarnation()) ==
+         StableNodeSnapshotState::retryable);
   assert(detail::classify_construction_node_snapshot(
            pointer, provisional, provisional, pointer.incarnation()) ==
          StableNodeSnapshotState::stable);

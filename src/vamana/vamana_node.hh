@@ -501,7 +501,7 @@ public:
         (compact[1] & 0x0eu) != 0 ||
         vamana::hot_graph::load_u32_le(compact + 8) !=
           expected_incarnation ||
-        vamana::hot_graph::load_u32_le(compact + 12) != 0) {
+        (vamana::hot_graph::load_u32_le(compact + 12) & 1u) != 0) {
       return false;
     }
     const u16 expected = vamana::hot_graph::load_u16_le(compact + 2);

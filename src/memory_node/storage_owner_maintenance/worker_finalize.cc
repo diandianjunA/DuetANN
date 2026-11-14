@@ -1,6 +1,7 @@
 #include "memory_node/storage_owner_maintenance/worker_internal.hh"
 
 #include <cstdlib>
+#include <syncstream>
 
 namespace memory_node_storage_owner_maintenance_detail {
 
@@ -138,7 +139,7 @@ bool Stage2Worker::consolidate_finalized_insertions() {
         if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
           static std::atomic<u32> debug_count{0};
           if (debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
-            std::cerr << "[stage2-refine-stall] reason=target_state"
+            std::osyncstream(std::cerr) << "[stage2-refine-stall] reason=target_state"
                       << " id=" << task.id
                       << " sequence=" << task.maintenance_sequence
                       << " state=" << static_cast<u32>(state)
@@ -228,7 +229,7 @@ bool Stage2Worker::consolidate_finalized_insertions() {
       if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
         static std::atomic<u32> debug_count{0};
         if (debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
-          std::cerr << "[stage2-refine-stall] reason=apply"
+          std::osyncstream(std::cerr) << "[stage2-refine-stall] reason=apply"
                     << " worker=" << worker_id_
                     << " tasks=" << chunk_tasks.size()
                     << " ops=" << ops.size()
@@ -329,7 +330,7 @@ bool Stage2Worker::finalize_context(Stage2Context& context) {
       }
       if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
         for (const ReconcileReverseOp& op : releases) {
-          std::cerr << "[cleanup-certificate-release] self=" << node_.storage_id_
+          std::osyncstream(std::cerr) << "[cleanup-certificate-release] self=" << node_.storage_id_
                     << " id=" << op.id << " sequence=" << op.placement_sequence
                     << " target=" << op.target_raw << " child=" << op.new_candidate_raw
                     << std::endl;
@@ -583,8 +584,13 @@ bool Stage2Worker::drive_context(Stage2Context& context) {
 
 
 bool Stage2Worker::drive_owned_context(Stage2Context& context) {
-    static const bool protocol_stall_debug =
-      std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr;
+    const bool protocol_stall_debug =
+      std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr ||
+      std::any_of(context.tasks.begin(), context.tasks.end(),
+        [](const StorageOwnerMaintenanceTask& task) {
+          return std::chrono::steady_clock::now() - task.queued_at >
+            std::chrono::seconds(60);
+        });
     const u64 debug_now_ns = steady_now_ns();
     if (protocol_stall_debug && context.active && !context.tasks.empty() &&
         debug_now_ns - last_protocol_stall_log_ns > 10'000'000'000ull &&
@@ -595,7 +601,7 @@ bool Stage2Worker::drive_owned_context(Stage2Context& context) {
           })) {
       last_protocol_stall_log_ns = debug_now_ns;
       const auto snapshot = states.snapshot(context.handle);
-      std::cerr << "[stage2-debug] worker=" << worker_id_
+      std::osyncstream(std::cerr) << "[stage2-debug] worker=" << worker_id_
                 << " slot=" << context.handle.slot
                 << " phase=" << (snapshot.has_value()
                   ? static_cast<u32>(snapshot->phase) : 255)
@@ -608,7 +614,7 @@ bool Stage2Worker::drive_owned_context(Stage2Context& context) {
                 << std::endl;
       for (size_t item = 0; item < context.tasks.size(); ++item) {
         const StorageOwnerMaintenanceTask& task = context.tasks[item];
-        std::cerr << "[stage2-debug] item=" << item
+        std::osyncstream(std::cerr) << "[stage2-debug] item=" << item
                   << " id=" << task.id
                   << " sequence=" << task.maintenance_sequence
                   << " subphase=" << static_cast<u32>(
@@ -629,6 +635,56 @@ bool Stage2Worker::drive_owned_context(Stage2Context& context) {
                   << " retry=" << (task.retry_not_before >
                     std::chrono::steady_clock::now())
                   << std::endl;
+      }
+      if (snapshot.has_value() &&
+          snapshot->phase == Stage2Phase::reverse_pending) {
+        for (u32 peer = 0; peer < node_.num_storage_nodes_; ++peer) {
+          const u64 bit = u64{1} << peer;
+          if ((snapshot->expected_reverse_mask & bit) == 0 ||
+              (snapshot->completed_reverse_mask & bit) != 0) {
+            continue;
+          }
+          const u64 request_id = context.reverse_request_ids[peer];
+          const auto metadata = requests.find(request_id);
+          const int response_state = node_.peer_async_responses_ == nullptr
+            ? -2 : node_.peer_async_responses_->debug_response_state(request_id);
+          std::osyncstream(std::cerr) << "[reverse-context-debug] self=" << node_.storage_id_
+                    << " worker=" << worker_id_
+                    << " slot=" << context.handle.slot
+                    << " generation=" << context.handle.generation
+                    << " peer=" << peer
+                    << " logical_request_id=" << request_id
+                    << " tracked=" << metadata.has_value()
+                    << " response_state=" << response_state
+                    << " completion_queue="
+                    << node_.storage_owner_reverse_completions_[worker_id_]
+                      ->approximate_size()
+                    << " outbox_size="
+                    << node_.storage_owner_reverse_outbox_->size()
+                    << " aggregate_size="
+                    << node_.storage_owner_reverse_outbox_->aggregate_size()
+                    << std::endl;
+          for (const auto& entry :
+               node_.storage_owner_reverse_outbox_->debug_snapshot()) {
+            if (entry.logical_request_id != request_id) continue;
+            std::osyncstream(std::cerr) << "[reverse-outbox-debug] self=" << node_.storage_id_
+                      << " logical_request_id=" << entry.logical_request_id
+                      << " wire_request_id=" << entry.wire_request_id
+                      << " owner=" << entry.owner_worker_id
+                      << " peer=" << entry.peer_index
+                      << " type=" << entry.request_type
+                      << " context_slot=" << entry.context_slot
+                      << " context_generation=" << entry.context_generation
+                      << " state=" << entry.state
+                      << " leased=" << entry.leased
+                      << " retries=" << entry.retry_attempts
+                      << " now=" << debug_now_ns
+                      << " ready_at=" << entry.ready_at_ns
+                      << " deadline=" << entry.deadline_ns << std::endl;
+          }
+          log_reverse_send_snapshot(
+            peer, request_id, context.remote_ops_by_peer[peer].size());
+        }
       }
     }
     auto* const previous_waiter_registrations =
@@ -820,7 +876,7 @@ Stage2Worker::Stage2Context* Stage2Worker::try_admit_context() {
           !node_.storage_owner_cleanup_tasks_.empty() &&
           cleanup_debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
         const auto& task = node_.storage_owner_cleanup_tasks_.front();
-        std::cerr << "[cleanup-admission-debug] self=" << node_.storage_id_
+        std::osyncstream(std::cerr) << "[cleanup-admission-debug] self=" << node_.storage_id_
                   << " worker=" << worker_id_
                   << " pending=" << node_.storage_owner_cleanup_tasks_.size()
                   << " dependencies=" <<
@@ -911,6 +967,16 @@ Stage2Worker::Stage2Context* Stage2Worker::try_admit_context() {
     node_.notify_storage_owner_maintenance_capacity();
     lib_assert(!context.tasks.empty(),
                "stage2 admitted an empty maintenance context");
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      std::osyncstream(std::cerr) << "[stage2-admit] worker=" << worker_id_
+                << " slot=" << context.handle.slot
+                << " generation=" << context.handle.generation
+                << " first_sequence=" << context.tasks.front().maintenance_sequence
+                << " last_sequence=" << context.tasks.back().maintenance_sequence
+                << " tasks=" << context.tasks.size()
+                << " active=" << node_.storage_owner_maintenance_active_workers_.load(
+                  std::memory_order_acquire) << std::endl;
+    }
     return &context;
   };
 

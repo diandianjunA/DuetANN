@@ -409,6 +409,70 @@ void test_graph_record_stale_incarnation_is_not_transport_failure() {
                                         false) == validation::ReadAction::fail);
   assert(validation::decide_read_action(false, validation::SnapshotState::valid,
                                         true) == validation::ReadAction::fail);
+
+  const std::array<byte_t, record_bytes> unpublished{};
+  assert(validation::classify_snapshot(
+           unpublished.data(), unpublished.size(), graph_degree,
+           graph_capacity, 11) == validation::SnapshotState::stale_incarnation);
+  assert(validation::classify_snapshot(
+           unpublished.data(), unpublished.size(), graph_degree,
+           graph_capacity, 0) == validation::SnapshotState::invalid);
+  assert(validation::classify_zero_extended_snapshot(
+           unpublished.data(), 24, unpublished.size(), graph_degree,
+           graph_capacity, 11) == validation::SnapshotState::stale_incarnation);
+  assert(validation::classify_zero_extended_snapshot(
+           unpublished.data(), 24, unpublished.size(), graph_degree,
+           graph_capacity, 0) == validation::SnapshotState::invalid);
+  assert(validation::decide_read_action(
+           true, validation::SnapshotState::stale_incarnation, false) ==
+         validation::ReadAction::discard_stale);
+  std::array<byte_t, record_bytes> corrupted = unpublished;
+  corrupted[8] = 11;
+  assert(validation::classify_snapshot(
+           corrupted.data(), corrupted.size(), graph_degree,
+           graph_capacity, 11) == validation::SnapshotState::invalid);
+}
+
+void test_graph_publication_in_progress_is_retryable_not_corrupt() {
+  namespace validation = gpu_search::graph_record_validation;
+  constexpr u32 graph_degree = 3;
+  constexpr u32 graph_capacity = 5;
+  constexpr u32 record_bytes = 56;
+  std::array<byte_t, record_bytes> record{};
+  record[0] = 1;
+  const auto store_u32 = [&](size_t offset, u32 value) {
+    record[offset + 0] = static_cast<byte_t>(value);
+    record[offset + 1] = static_cast<byte_t>(value >> 8);
+    record[offset + 2] = static_cast<byte_t>(value >> 16);
+    record[offset + 3] = static_cast<byte_t>(value >> 24);
+  };
+  store_u32(8, 12);
+  store_u32(validation::kGraphPublicationVersionOffset, 1);
+  const auto seal = [&]() {
+    const u16 checksum = validation::checksum16(
+      record.data(), static_cast<u32>(record.size()));
+    record[2] = static_cast<byte_t>(checksum);
+    record[3] = static_cast<byte_t>(checksum >> 8);
+  };
+  seal();
+  assert(validation::classify_snapshot(
+           record.data(), record.size(), graph_degree, graph_capacity, 12) ==
+         validation::SnapshotState::invalid);
+  assert(validation::classify_zero_extended_snapshot(
+           record.data(), 24, record.size(), graph_degree, graph_capacity, 12) ==
+         validation::SnapshotState::invalid);
+  assert(validation::decide_read_action(true,
+           validation::SnapshotState::invalid, true) ==
+         validation::ReadAction::retry);
+
+  store_u32(validation::kGraphPublicationVersionOffset, 2);
+  seal();
+  assert(validation::classify_snapshot(
+           record.data(), record.size(), graph_degree, graph_capacity, 12) ==
+         validation::SnapshotState::valid);
+  assert(validation::classify_zero_extended_snapshot(
+           record.data(), 24, record.size(), graph_degree, graph_capacity, 12) ==
+         validation::SnapshotState::valid);
 }
 
 void test_graph_live_extent_reconstructs_canonical_record() {
@@ -823,6 +887,7 @@ int main() {
   test_supported_gpu_layout_limits();
   test_tagged_remote_pointer();
   test_graph_record_stale_incarnation_is_not_transport_failure();
+  test_graph_publication_in_progress_is_retryable_not_corrupt();
   test_graph_live_extent_reconstructs_canonical_record();
   format::View view;
   view.layout.dim = 16;

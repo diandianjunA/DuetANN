@@ -24,6 +24,7 @@ inline constexpr std::uint32_t kGraphRecordHeaderBytes =
   vamana::graph_extent::kHeaderBytes;
 inline constexpr std::uint32_t kGraphPointerBytes =
   vamana::graph_extent::kPointerBytes;
+inline constexpr std::uint32_t kGraphPublicationVersionOffset = 12;
 inline constexpr std::uint32_t kGraphExtentEdgesPerClass =
   vamana::graph_extent::kQuantumEdges;
 inline constexpr std::uint8_t kGraphExtentClassUnknown =
@@ -34,6 +35,10 @@ inline constexpr std::uint8_t kGraphExtentClassUnknown =
 #else
 #define DVSTOR_GRAPH_RECORD_HD inline
 #endif
+
+DVSTOR_GRAPH_RECORD_HD bool graph_publication_committed(std::uint32_t version) {
+  return (version & 1u) == 0;
+}
 
 DVSTOR_GRAPH_RECORD_HD bool is_full_record_avoidance_hit(
     bool live_extent, bool partial_read, SnapshotState snapshot) {
@@ -133,7 +138,8 @@ DVSTOR_GRAPH_RECORD_HD bool required_live_extent_bytes(
       stable_count > graph_degree ||
       provisional_count > provisional_capacity ||
       stable_count + provisional_count > graph_entry_capacity ||
-      load_u32(record + 12) != 0) {
+      !graph_publication_committed(
+        load_u32(record + kGraphPublicationVersionOffset))) {
     return false;
   }
   required_bytes = kGraphRecordHeaderBytes +
@@ -187,6 +193,13 @@ adapted_graph_extent_word(
   return transition;
 }
 
+DVSTOR_GRAPH_RECORD_HD bool graph_record_is_zero_initialized_dynamic(
+    const std::uint8_t* record) {
+  return record[0] == 0 && record[1] == 0 && record[2] == 0 &&
+    record[3] == 0 && load_u32(record + 4) == 0 &&
+    load_u32(record + 8) == 0 && load_u32(record + 12) == 0;
+}
+
 // A checksum-valid dynamic graph record with another incarnation is not a
 // damaged RDMA response: cleanup may have recycled the slot while an older
 // read-committed query still holds its tagged handle.  Static records are never
@@ -200,6 +213,10 @@ DVSTOR_GRAPH_RECORD_HD SnapshotState classify_snapshot(
   if (record == nullptr || record_bytes < 16 ||
       graph_entry_capacity < graph_degree) {
     return SnapshotState::invalid;
+  }
+  if (graph_record_is_zero_initialized_dynamic(record)) {
+    return expected_incarnation == 0
+      ? SnapshotState::invalid : SnapshotState::stale_incarnation;
   }
   const std::uint16_t stored_checksum =
     static_cast<std::uint16_t>(record[2]) |
@@ -240,6 +257,10 @@ DVSTOR_GRAPH_RECORD_HD SnapshotState classify_zero_extended_snapshot(
       transferred_bytes >= record_bytes ||
       graph_entry_capacity < graph_degree) {
     return SnapshotState::invalid;
+  }
+  if (graph_record_is_zero_initialized_dynamic(record)) {
+    return expected_incarnation == 0
+      ? SnapshotState::invalid : SnapshotState::stale_incarnation;
   }
   const std::uint16_t stored_checksum =
     static_cast<std::uint16_t>(record[2]) |

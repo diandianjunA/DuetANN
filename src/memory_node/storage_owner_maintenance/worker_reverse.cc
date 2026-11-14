@@ -1,6 +1,9 @@
 #include "memory_node/storage_owner_maintenance/worker_internal.hh"
 
 #include <cstdlib>
+#include <mutex>
+#include <syncstream>
+#include <unordered_map>
 
 namespace memory_node_storage_owner_maintenance_detail {
 
@@ -36,7 +39,7 @@ bool Stage2Worker::bind_context_lane(Stage2Context& context) {
       }
       static std::atomic<u32> debug_count{0};
       if (debug_count.fetch_add(1, std::memory_order_relaxed) >= 64) return;
-      std::cerr << "[stage2-lane-bind-failure] reason=" << reason
+      std::osyncstream(std::cerr) << "[stage2-lane-bind-failure] reason=" << reason
                 << " worker=" << worker_id_
                 << " first_id=" << context.tasks.front().id
                 << " active_leases=" << node_.storage_owner_search_lane_leases_.load(
@@ -88,6 +91,16 @@ bool Stage2Worker::release_rebindable_context_lane(Stage2Context& context) {
 
 
 void Stage2Worker::reset_context(Stage2Context& context) {
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+        context.active && !context.tasks.empty()) {
+      std::osyncstream(std::cerr) << "[stage2-reset] worker=" << worker_id_
+                << " slot=" << context.handle.slot
+                << " generation=" << context.handle.generation
+                << " first_sequence=" << context.tasks.front().maintenance_sequence
+                << " tasks=" << context.tasks.size()
+                << " input_prepared=" << context.search_input_prepared
+                << std::endl;
+    }
     auto* const previous_waiter_registrations =
       MemoryNode::current_storage_owner_maintenance_waiter_registrations_;
     MemoryNode::current_storage_owner_maintenance_waiter_registrations_ =
@@ -262,13 +275,13 @@ void Stage2Worker::materialize_stable_identity_wave(size_t task_count) {
     static std::atomic<u32> identity_debug_count{0};
     if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
         identity_debug_count.fetch_add(1, std::memory_order_relaxed) < 12) {
-      std::cerr << "[stage2-identity-debug] worker=" << worker_id_
+      std::osyncstream(std::cerr) << "[stage2-identity-debug] worker=" << worker_id_
                 << " targets=" << snapshot_plan.targets.size()
                 << " identities=" << identity_count
                 << " stable=" << stable_identity_targets.size() << std::endl;
       for (size_t index = 0; index < std::min<size_t>(4, identity_count); ++index) {
         const auto& [pointer, header] = identity_storage[index];
-        std::cerr << "[stage2-identity-debug] raw=" << pointer.raw_address
+        std::osyncstream(std::cerr) << "[stage2-identity-debug] raw=" << pointer.raw_address
                   << " header=" << header
                   << " incarnation=" << pointer.incarnation()
                   << " eligible=" << stage2_parent_is_stable(
@@ -276,7 +289,7 @@ void Stage2Worker::materialize_stable_identity_wave(size_t task_count) {
                   << std::endl;
       }
       for (size_t task = 0; task < std::min<size_t>(2, task_count); ++task) {
-        std::cerr << "[stage2-identity-debug] task=" << task
+        std::osyncstream(std::cerr) << "[stage2-identity-debug] task=" << task
                   << " live=" << live_stage2_neighbors_by_task[task].size()
                   << " final=" << snapshot_plan.task_target_indices[task].size()
                   << std::endl;
@@ -373,9 +386,15 @@ bool Stage2Worker::apply_reconcile_ops(
     const auto debug_failure = [&](const char* reason,
                                    span<const ReconcileReverseOp> failed_ops) {
       if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") == nullptr) return;
-      static std::atomic<u32> debug_count{0};
+      static std::mutex debug_mutex;
+      static std::unordered_map<u64, u32> debug_counts;
       for (const auto& op : failed_ops) {
-        if (debug_count.fetch_add(1, std::memory_order_relaxed) >= 128) break;
+        u32 count = 0;
+        {
+          std::lock_guard<std::mutex> lock(debug_mutex);
+          count = ++debug_counts[op.id];
+        }
+        if (count > 16 && (count & (count - 1)) != 0) continue;
         std::string message = "[reconcile-op-debug] reason=" +
           std::string(reason) + " worker=" + std::to_string(worker_id_) +
           " kind=" + std::to_string(op.kind) +
@@ -393,7 +412,7 @@ bool Stage2Worker::apply_reconcile_ops(
             " target_header=" + std::to_string(
               node_.load_local_node_header_acquire(target));
         }
-        std::cerr << message << std::endl;
+        std::osyncstream(std::cerr) << message << std::endl;
       }
     };
     if (retry_mask != nullptr) retry_mask->assign(ops.size(), 0);
@@ -691,6 +710,45 @@ bool Stage2Worker::reparent_cleanup_children(
         }
       }
       if (replacement.is_null()) {
+        static std::atomic<u32> debug_count{0};
+        const auto task_age =
+          std::chrono::steady_clock::now() - task.queued_at;
+        if ((std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr ||
+             task_age > std::chrono::seconds(60)) &&
+            debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
+          std::osyncstream(std::cerr) << "[cleanup-reparent-debug] self=" << node_.storage_id_
+                    << " worker=" << worker_id_ << " reason=no_replacement"
+                    << " id=" << task.id << " generation=" << task.generation
+                    << " sequence=" << task.maintenance_sequence
+                    << " child=" << child.raw_address
+                    << " stable_neighbors=" << child_adjacency.stable.size()
+                    << " candidates=" << candidates.size() << std::endl;
+          static std::atomic<u32> candidate_debug_count{0};
+          for (const RemotePtr candidate : candidates) {
+            if (candidate_debug_count.fetch_add(1, std::memory_order_relaxed) >=
+                128) {
+              break;
+            }
+            NodeSnapshot candidate_snapshot;
+            const bool snapshot_read =
+              node_.read_node_snapshot(candidate, candidate_snapshot);
+            std::osyncstream(std::cerr)
+              << "[cleanup-replacement-debug] self=" << node_.storage_id_
+              << " worker=" << worker_id_ << " id=" << task.id
+              << " child=" << child.raw_address
+              << " candidate=" << candidate.raw_address
+              << " snapshot_read=" << snapshot_read
+              << " header=" << (snapshot_read ? candidate_snapshot.header : 0)
+              << " deleted=" << (snapshot_read && candidate_snapshot.deleted)
+              << " stable=" << (snapshot_read &&
+                VamanaNode::stable_graph_mutation_allowed(
+                  candidate_snapshot.header))
+              << " accounted=" << (snapshot_read &&
+                (candidate_snapshot.header &
+                 VamanaNode::HEADER_CENTROID_ACCOUNTED) != 0)
+              << std::endl;
+          }
+        }
         return false;
       }
       reservations.push_back(ReconcileReverseOp{
@@ -839,7 +897,7 @@ bool Stage2Worker::append_stage2_reconcile_ops(
             std::chrono::seconds(5)) {
         static std::atomic<u32> debug_count{0};
         if (debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
-          std::cerr << "[stage2-reconcile-stall] reason=no_promotion_parent"
+          std::osyncstream(std::cerr) << "[stage2-reconcile-stall] reason=no_promotion_parent"
                     << " id=" << task.id
                     << " sequence=" << task.maintenance_sequence
                     << " final_neighbors=" << task.stage2_neighbors.size()
@@ -854,7 +912,7 @@ bool Stage2Worker::append_stage2_reconcile_ops(
     static std::atomic<u32> planner_debug_count{0};
     if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
         planner_debug_count.fetch_add(1, std::memory_order_relaxed) < 12) {
-      std::cerr << "[stage2-planner-debug] id=" << task.id
+      std::osyncstream(std::cerr) << "[stage2-planner-debug] id=" << task.id
                 << " final=" << task.stage2_neighbors.size()
                 << " live=" << live_final_neighbors.size()
                 << " promotion=" << plan.promotion_target.raw_address
@@ -984,12 +1042,12 @@ bool Stage2Worker::complete_stale_stage2(StorageOwnerMaintenanceTask& task,
             task_age > std::chrono::seconds(5)) ||
            task_age > std::chrono::seconds(60)) &&
           debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
-        std::cerr << "[stage2-stale-debug] self=" << node_.storage_id_
+        std::osyncstream(std::cerr) << "[stage2-stale-debug] self=" << node_.storage_id_
                   << " id=" << task.id
                   << " sequence=" << task.maintenance_sequence
                   << " reason=" << reason;
-        if (status >= 0) std::cerr << " status=" << status;
-        std::cerr << std::endl;
+        if (status >= 0) std::osyncstream(std::cerr) << " status=" << status;
+        std::osyncstream(std::cerr) << std::endl;
       }
       return false;
     };
@@ -1049,7 +1107,7 @@ bool Stage2Worker::complete_stale_stage2(StorageOwnerMaintenanceTask& task,
         for (const RemotePtr parent : parents) {
           message += std::to_string(parent.raw_address) + ",";
         }
-        std::cerr << message << std::endl;
+        std::osyncstream(std::cerr) << message << std::endl;
       }
       for (const RemotePtr parent : parents) {
         releases.push_back(make_reconcile_op(
@@ -1353,6 +1411,57 @@ bool Stage2Worker::poll_owned_reverse_aggregates() {
 
       if (response == TryPeerResponse::failure ||
           response == TryPeerResponse::stale) {
+        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+            aggregate->retry_attempts >= 3 &&
+            ((aggregate->retry_attempts + 1) &
+             aggregate->retry_attempts) == 0) {
+          std::string message = std::string("[reverse-failure-debug] self=") +
+            std::to_string(node_.storage_id_) + " worker=" +
+            std::to_string(worker_id_) + " peer=" +
+            std::to_string(aggregate->peer_index) + " wire_request_id=" +
+            std::to_string(aggregate->wire_request_id) + " type=" +
+            std::to_string(static_cast<u32>(aggregate->request_type)) +
+            " items=" + std::to_string(aggregate->item_count) +
+            " logical=" + std::to_string(aggregate->logical_count) +
+            " retry=" + std::to_string(aggregate->retry_attempts + 1) +
+            " response=" + std::to_string(static_cast<u32>(response)) +
+            " status=" + std::to_string(header.status);
+          reverse_wire_ops.resize(aggregate->item_count);
+          lib_assert(node_.storage_owner_reverse_outbox_->copy_ops(
+                       worker_id_, aggregate->wire_request_id,
+                       std::span<ReverseUpdateOp>{reverse_wire_ops}),
+                     "failed reverse request lost its immutable payload");
+          for (size_t index = 0;
+               index < std::min<size_t>(reverse_wire_ops.size(), 16); ++index) {
+            const auto& op = reverse_wire_ops[index];
+            message += " op(" + std::to_string(op.target_raw) + "," +
+              std::to_string(op.candidate_raw) + "," +
+              std::to_string(op.target_id) + "," +
+              std::to_string(op.target_generation) + "," +
+              std::to_string(op.candidate_id) + "," +
+              std::to_string(op.candidate_generation) + ")";
+          }
+          std::osyncstream(std::cerr) << message << std::endl;
+        }
+        if (response == TryPeerResponse::stale) {
+          static std::atomic<u32> debug_count{0};
+          if (debug_count.fetch_add(1, std::memory_order_relaxed) < 128) {
+            const auto metadata = node_.peer_async_responses_
+              ->debug_response_metadata(aggregate->wire_request_id);
+            std::osyncstream(std::cerr) << std::string("[reverse-stale-debug] self=") +
+              std::to_string(node_.storage_id_) + " peer=" +
+              std::to_string(aggregate->peer_index) + " request_id=" +
+              std::to_string(aggregate->wire_request_id) + " expected_type=" +
+              std::to_string(static_cast<u32>(response_type)) +
+              " expected_items=" + std::to_string(aggregate->item_count) +
+              " registry_state=" + std::to_string(metadata.state) +
+              " registry_request_id=" + std::to_string(metadata.request_id) +
+              " registry_peer=" + std::to_string(metadata.expected_shard) +
+              " registry_type=" + std::to_string(metadata.expected_type) +
+              " registry_items=" + std::to_string(metadata.expected_item_count)
+                      << std::endl;
+          }
+        }
         if (response == TryPeerResponse::failure && response_lease.valid()) {
           (void)node_.rearm_peer_rpc_response(response_lease);
         }
@@ -1370,6 +1479,22 @@ bool Stage2Worker::poll_owned_reverse_aggregates() {
       }
 
       const bool timed_out = now >= aggregate->deadline_ns;
+      static std::atomic<u32> debug_count{0};
+      if ((response == TryPeerResponse::failure ||
+           response == TryPeerResponse::stale || timed_out) &&
+          (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr ||
+           aggregate->retry_attempts >= 3) &&
+          debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
+        std::osyncstream(std::cerr) << "[reverse-ack-debug] self=" << node_.storage_id_
+                  << " worker=" << worker_id_
+                  << " peer=" << aggregate->peer_index
+                  << " wire_request_id=" << aggregate->wire_request_id
+                  << " request_type=" << static_cast<u32>(aggregate->request_type)
+                  << " items=" << aggregate->item_count
+                  << " logical=" << aggregate->logical_count
+                  << " retries=" << aggregate->retry_attempts
+                  << " response=" << static_cast<u32>(response) << std::endl;
+      }
       if (timed_out) {
         node_.storage_owner_maintenance_rpc_timeouts_.fetch_add(
           1, std::memory_order_relaxed);
@@ -1416,6 +1541,47 @@ bool Stage2Worker::form_reverse_aggregates() {
 
 
 
+void Stage2Worker::log_reverse_send_snapshot(
+    u32 peer, u64 request_id, u32 item_count) {
+    std::array<size_t, 3> free_slots{};
+    {
+      std::lock_guard<std::mutex> lock(node_.peer_rpc_send_slots_mutex_);
+      for (size_t send_class = 0; send_class < free_slots.size(); ++send_class) {
+        free_slots[send_class] =
+          node_.peer_rpc_free_send_slots_[peer][send_class].size();
+      }
+    }
+    size_t pending_sends = 0;
+    {
+      std::lock_guard<std::mutex> lock(node_.peer_completion_mutex_);
+      for (const auto& [wr_id, pending] : node_.peer_pending_sends_) {
+        pending_sends += pending.release_rpc_slot && pending.target_shard == peer;
+      }
+    }
+    const auto& registry = node_.peer_async_responses_;
+    std::osyncstream(std::cerr) << std::string("[reverse-resource-debug] self=") +
+      std::to_string(node_.storage_id_) + " worker=" +
+      std::to_string(worker_id_) + " peer=" + std::to_string(peer) +
+      " request_id=" + std::to_string(request_id) +
+      " items=" + std::to_string(item_count) +
+      " request_bytes=" + std::to_string(
+        service::storage_owner::reverse_update_request_bytes(item_count)) +
+      " registry_state=" + std::to_string(
+        registry == nullptr ? -2 : registry->debug_response_state(request_id)) +
+      " registry_size=" + std::to_string(
+        registry == nullptr ? 0 : registry->size()) +
+      " registry_capacity=" + std::to_string(
+        registry == nullptr ? 0 : registry->capacity()) +
+      " message_bytes=" + std::to_string(
+        node_.peer_rpc_runtime_.message_bytes) +
+      " free_stage1=" + std::to_string(free_slots[0]) +
+      " free_graph=" + std::to_string(free_slots[1]) +
+      " free_control=" + std::to_string(free_slots[2]) +
+      " pending_sends=" + std::to_string(pending_sends) << std::endl;
+  };
+
+
+
 bool Stage2Worker::post_owned_reverse_aggregates() {
     bool progressed = false;
     size_t cursor = 0;
@@ -1450,6 +1616,11 @@ bool Stage2Worker::post_owned_reverse_aggregates() {
       if (sent) {
         progressed = true;
       } else {
+        if (aggregate->retry_attempts >= 8) {
+          log_reverse_send_snapshot(
+            aggregate->peer_index, aggregate->wire_request_id,
+            aggregate->item_count);
+        }
         node_.storage_owner_maintenance_pressure_yields_.fetch_add(
           1, std::memory_order_relaxed);
       }

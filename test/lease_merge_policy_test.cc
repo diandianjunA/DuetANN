@@ -16,7 +16,6 @@ void test_lease_lifecycle_capacity_and_replay() {
   CertificateLeaseTable leases(2);
   assert(leases.acquire(10, 100, 1) == CertificateAcquireResult::acquired);
   assert(leases.acquire(10, 100, 1) == CertificateAcquireResult::replay);
-  assert(leases.acquire(10, 100, 2) == CertificateAcquireResult::conflict);
   assert(leases.contains(10, 100, 1));
   assert(leases.active_at(10) == 1);
 
@@ -51,6 +50,36 @@ void test_lease_lifecycle_capacity_and_replay() {
   assert(leases.commit(10, {}, {{100, 2}}));
   assert(!leases.contains(10, 100));
   assert(leases.acquire(10, 102, 3) == CertificateAcquireResult::acquired);
+}
+
+void test_concurrent_cleanup_sequences_are_independent() {
+  CertificateLeaseTable leases(2);
+  constexpr std::uint64_t target = 10;
+  constexpr std::uint64_t child = 100;
+  assert(leases.acquire(target, child, 1) == CertificateAcquireResult::acquired);
+  assert(leases.acquire(target, child, 2) == CertificateAcquireResult::acquired);
+  assert(leases.acquire(target, child, 2) == CertificateAcquireResult::replay);
+  assert(leases.size() == 1);
+  assert(leases.active_at(target) == 1);
+  assert(leases.contains(target, child, 1));
+  assert(leases.contains(target, child, 2));
+  assert(leases.commit(target, {}, {{child, 1}}));
+  assert(!leases.contains(target, child, 1));
+  assert(leases.contains(target, child, 2));
+  assert(leases.commit(target, {}, {{child, 1}}));
+  assert(leases.contains(target, child, 2));
+  assert(leases.commit(target, {{child, 2}}, {}));
+  assert(leases.size() == 1);
+  assert(leases.release(target, child, 2));
+  assert(!leases.contains(target, child));
+  assert(leases.acquire(target, child, 2) == CertificateAcquireResult::replay);
+
+  assert(leases.acquire(target, child, 3) == CertificateAcquireResult::acquired);
+  assert(leases.acquire(target, child, 4) == CertificateAcquireResult::acquired);
+  assert(leases.release(target, child, 3));
+  assert(leases.contains(target, child, 4));
+  assert(leases.release(target, child, 4));
+  assert(!leases.contains(target, child));
 }
 
 void test_retired_target_cleanup_reclaims_lease() {
@@ -360,6 +389,7 @@ int main() {
   test_incremental_refinement_preserves_existing_leases();
   test_atomic_cut_capacity_only_add_preserves_certificate();
   test_lease_lifecycle_capacity_and_replay();
+  test_concurrent_cleanup_sequences_are_independent();
   test_retired_target_cleanup_reclaims_lease();
   test_late_acquire_replay_does_not_reinsert_released_lease();
   test_cleanup_depends_only_on_matching_incarnation();

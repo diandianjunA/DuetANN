@@ -134,6 +134,11 @@ bool MemoryNode::reconcile_lease_merge_ops(
       }
       continue;
     }
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      std::cerr << std::string("[reconcile-stage] self=") +
+        std::to_string(storage_id_) + " target=" +
+        std::to_string(target_raw) + " point=before_lease_lock" << std::endl;
+    }
     const IncarnationLockResult lock = try_lock_node(target);
     if (lock == IncarnationLockResult::stale) {
       (void)storage_owner_certificate_leases_->release_target(
@@ -435,6 +440,11 @@ bool MemoryNode::reconcile_lease_merge_ops(
     bool prune_retryable = false;
     auto robust_prune = [&](const vec<RemotePtr>& candidates,
                             size_t existing_count = 0) {
+      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        std::cerr << std::string("[reconcile-stage] self=") +
+          std::to_string(storage_id_) + " target=" +
+          std::to_string(target_raw) + " point=before_lease_snapshot" << std::endl;
+      }
       vec<StableNodeSnapshotState> states;
       const vec<NodeSnapshot> snapshots = read_node_snapshots_batched(
         candidates, config, "lease_merge_atomic_cut", &states);
@@ -546,6 +556,11 @@ bool MemoryNode::reconcile_lease_merge_ops(
     }
     const bool changed = before_stable != plan.stable ||
       before_provisional != plan.provisional;
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      std::cerr << std::string("[reconcile-stage] self=") +
+        std::to_string(storage_id_) + " target=" +
+        std::to_string(target_raw) + " point=before_lease_unlock" << std::endl;
+    }
     if (changed) {
       write_graph_adjacency(target, plan.stable, plan.provisional,
                             adjacency.generation, false);

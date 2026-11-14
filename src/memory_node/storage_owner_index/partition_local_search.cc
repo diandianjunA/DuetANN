@@ -7,6 +7,7 @@
 #include "memory_node/storage_owner_maintenance/ordered_commit_policy.hh"
 
 #include <numeric>
+#include <syncstream>
 
 using namespace memory_node_storage_owner_index_detail;
 using namespace memory_node_storage_owner_maintenance_detail;
@@ -64,6 +65,24 @@ vec<RemotePtr> MemoryNode::partition_local_search_candidates(
                                     : local_neighbor_decoded;
   neighbors.reserve(config.R);
 
+  const auto trace_retry = [&](const char* boundary, RemotePtr candidate,
+                               u64 before, u64 after, u32 slot_incarnation,
+                               std::chrono::steady_clock::time_point started) {
+    if (std::getenv("DVSTOR_SEARCH_STALL_DEBUG") == nullptr) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - started < std::chrono::seconds(5)) return;
+    thread_local u64 last_log_ns = 0;
+    const u64 now_ns = steady_now_ns();
+    if (now_ns - last_log_ns < 10'000'000'000ull) return;
+    last_log_ns = now_ns;
+    std::osyncstream(std::cerr) << std::string("[partition-search-wait] boundary=") + boundary +
+      " candidate=" + std::to_string(candidate.raw_address) +
+      " expected_incarnation=" + std::to_string(candidate.incarnation()) +
+      " slot_incarnation=" + std::to_string(slot_incarnation) +
+      " before=" + std::to_string(before) +
+      " after=" + std::to_string(after) << std::endl;
+  };
+
   const u32 construction_width = storage_owner_construction_width(config);
   const VectorDType dtype = VamanaNode::vector_dtype();
   const bool exact_integral_query = integral_raw_query != nullptr &&
@@ -82,19 +101,12 @@ vec<RemotePtr> MemoryNode::partition_local_search_candidates(
     const byte_t* vector = node + VamanaNode::offset_vector();
     for (;;) {
       const u64 before = load_local_node_header_acquire(candidate);
-      if ((before & VamanaNode::HEADER_NODE_LOCK) != 0) {
-        std::this_thread::yield();
-        continue;
-      }
       const u32 slot_incarnation = *reinterpret_cast<const u32*>(
         node + VamanaNode::offset_slot_incarnation());
-
-      // Avoid an O(D) distance calculation for a conclusively dead physical
-      // identity.  It is conclusive only when the header remains unchanged
-      // and unlocked around the slot-incarnation observation.
-      if (VamanaNode::header_incarnation(before) != candidate.incarnation() ||
-          slot_incarnation != candidate.incarnation() ||
-          (before & VamanaNode::HEADER_DELETED) != 0) {
+      if ((before & (VamanaNode::HEADER_NODE_LOCK |
+                     VamanaNode::HEADER_DELETED)) != 0 ||
+          VamanaNode::header_incarnation(before) != candidate.incarnation() ||
+          slot_incarnation != candidate.incarnation()) {
         std::atomic_thread_fence(std::memory_order_acquire);
         const u64 after = load_local_node_header_acquire(candidate);
         const StableNodeSnapshotState state =
@@ -107,6 +119,8 @@ vec<RemotePtr> MemoryNode::partition_local_search_candidates(
           }
           return std::nullopt;
         }
+        trace_retry("score", candidate, before, after, slot_incarnation,
+                    started);
         std::this_thread::yield();
         continue;
       }
@@ -215,6 +229,8 @@ vec<RemotePtr> MemoryNode::partition_local_search_candidates(
         // A changing/locked header explains this miss; it is ordinary
         // contention rather than evidence of persistent graph corruption.
         stable_optimistic_misses = 0;
+        trace_retry("expand", candidate, before, after, slot_incarnation,
+                    started);
         std::this_thread::yield();
         continue;
       }
@@ -233,6 +249,8 @@ vec<RemotePtr> MemoryNode::partition_local_search_candidates(
       // decode cannot race a graph writer and therefore must succeed.
       const IncarnationLockResult lock = try_lock_node(candidate);
       if (lock == IncarnationLockResult::busy) {
+        trace_retry("expand_lock", candidate, before, before,
+                    slot_incarnation, started);
         std::this_thread::yield();
         continue;
       }
@@ -302,6 +320,8 @@ vec<RemotePtr> MemoryNode::partition_local_search_candidates(
           }
           return state == StableNodeSnapshotState::stable;
         }
+        trace_retry("filter", candidate, before, after, slot_incarnation,
+                    validation_started);
         std::this_thread::yield();
       }
     });

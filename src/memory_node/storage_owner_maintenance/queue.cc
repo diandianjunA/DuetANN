@@ -3,6 +3,7 @@
 #include "memory_node/storage_owner_maintenance/cleanup_scheduler.hh"
 
 #include <cstdlib>
+#include <syncstream>
 
 using namespace memory_node_storage_owner_maintenance_detail;
 
@@ -131,6 +132,14 @@ u64 MemoryNode::arm_storage_owner_maintenance_batch(
                    "duplicate physical Stage2 dependency");
         storage_owner_stage2_tasks_.push_back(std::move(tasks[item]));
       }
+      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        std::osyncstream(std::cerr) << "[stage2-arm] self=" << storage_id_
+                  << " first_sequence=" << first_sequence
+                  << " tasks=" << task_count
+                  << " first_id=" << tasks.front().id
+                  << " first_target=" << tasks.front().target.raw_address
+                  << std::endl;
+      }
       storage_owner_stage2_packing_.observe_enqueue(queued_at, task_count);
       backlog = storage_owner_stage2_tasks_.size() +
         storage_owner_cleanup_tasks_.size();
@@ -202,7 +211,7 @@ u64 MemoryNode::activate_storage_owner_cleanup_batch(
     while (!storage_owner_maintenance_cv_.wait_for(
         lock, std::chrono::seconds(5), permit_available)) {
       if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
-        std::cerr << "[cleanup-admission-wait] self=" << storage_id_
+        std::osyncstream(std::cerr) << "[cleanup-admission-wait] self=" << storage_id_
                   << " tasks=" << task_count
                   << " first_id=" << tasks.front().id
                   << " stage2_queue=" << storage_owner_stage2_tasks_.size()
@@ -235,7 +244,7 @@ u64 MemoryNode::activate_storage_owner_cleanup_batch(
         std::chrono::steady_clock::now() - last_debug >=
           std::chrono::seconds(5)) {
       last_debug = std::chrono::steady_clock::now();
-      std::cerr << "[cleanup-completion-wait] self=" << storage_id_
+      std::osyncstream(std::cerr) << "[cleanup-completion-wait] self=" << storage_id_
                 << " tasks=" << task_count
                 << " first_id=" << tasks.front().id
                 << " incomplete=" << storage_owner_maintenance_incomplete()

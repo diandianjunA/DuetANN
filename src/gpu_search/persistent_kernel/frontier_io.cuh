@@ -2237,9 +2237,21 @@ __device__ u32 fetch_graph_records_batch(
       const u32 status_magnitude =
         status < 0 ? min(static_cast<u32>(-(status + 1)) + 1u, 0xffffu)
                    : min(static_cast<u32>(status), 0xffffu);
-      atomicCAS(&failed, 0u,
+      const u32 previous_failure = atomicCAS(&failed, 0u,
                 status == 0 ? 5u : (u32{1} << 16) | status_magnitude);
       if (status == 0) {
+        if (previous_failure == 0) {
+          printf("[graph-snapshot-debug] handle=%llu version=%u stored_checksum=%u actual_checksum=%u stable=%u provisional=%u generation=%u incarnation=%u\n",
+                 static_cast<unsigned long long>(handles[index]),
+                 graph_record_validation::load_u32(record + 12),
+                 static_cast<u32>(record[2] | (record[3] << 8)),
+                 static_cast<u32>(graph_record_validation::checksum16(
+                   record, params.graph_entry_bytes)),
+                 static_cast<u32>(record[0]),
+                 static_cast<u32>((record[1] >> 4) & 0xfu),
+                 graph_record_validation::load_u32(record + 4),
+                 graph_record_validation::load_u32(record + 8));
+        }
         if (params.direct_error != nullptr) {
           atomicCAS(params.direct_error, 0, -EBADMSG);
         }

@@ -420,6 +420,62 @@ class Stage2ReverseOutbox {
     return aggregate_size_;
   }
 
+  struct DebugEntry {
+    std::uint64_t logical_request_id{};
+    std::uint64_t wire_request_id{};
+    std::uint32_t owner_worker_id{};
+    std::uint32_t peer_index{};
+    std::uint32_t request_type{};
+    std::uint32_t context_slot{};
+    std::uint32_t context_generation{};
+    std::uint32_t state{};
+    std::uint32_t retry_attempts{};
+    std::uint64_t ready_at_ns{};
+    std::uint64_t deadline_ns{};
+    bool leased{};
+  };
+
+  [[nodiscard]] std::vector<DebugEntry> debug_snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<DebugEntry> result;
+    result.reserve(logical_size_);
+    for (const Entry& entry : entries_) {
+      if (!entry.in_use || !entry.queued) continue;
+      const Stage2ReverseDispatch& dispatch = entry.dispatch;
+      result.push_back(DebugEntry{
+        .logical_request_id = dispatch.logical_request_id,
+        .owner_worker_id = dispatch.worker_id,
+        .peer_index = dispatch.peer_index,
+        .request_type = static_cast<std::uint32_t>(dispatch.request_type),
+        .context_slot = dispatch.context.slot,
+        .context_generation = dispatch.context.generation,
+        .ready_at_ns = dispatch.ready_at_ns,
+      });
+    }
+    for (const Aggregate& aggregate : aggregates_) {
+      if (!aggregate.in_use) continue;
+      for (std::uint32_t index = aggregate.member_head; index != npos;
+           index = entries_[index].aggregate_next) {
+        const Stage2ReverseDispatch& dispatch = entries_[index].dispatch;
+        result.push_back(DebugEntry{
+          .logical_request_id = dispatch.logical_request_id,
+          .wire_request_id = aggregate.snapshot.wire_request_id,
+          .owner_worker_id = aggregate.snapshot.owner_worker_id,
+          .peer_index = dispatch.peer_index,
+          .request_type = static_cast<std::uint32_t>(dispatch.request_type),
+          .context_slot = dispatch.context.slot,
+          .context_generation = dispatch.context.generation,
+          .state = aggregate.state == AggregateState::ready_to_post ? 1u : 2u,
+          .retry_attempts = aggregate.snapshot.retry_attempts,
+          .ready_at_ns = aggregate.snapshot.ready_at_ns,
+          .deadline_ns = aggregate.snapshot.deadline_ns,
+          .leased = aggregate.leased,
+        });
+      }
+    }
+    return result;
+  }
+
   [[nodiscard]] std::size_t capacity() const noexcept {
     return entries_.size();
   }

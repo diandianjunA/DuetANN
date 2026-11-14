@@ -50,48 +50,47 @@ void MemoryNode::write_graph_adjacency(
 
   u32 generation = generation_override.value_or(0);
   bool deleted = deleted_override.value_or(false);
-  if (!generation_override.has_value() || !deleted_override.has_value()) {
-    vec<byte_t> previous(entry_size, 0);
+  vec<byte_t> previous(entry_size, 0);
+  if (local_shard(rptr.memory_node())) {
+    std::memcpy(previous.data(),
+                index_buffer_.get_full_buffer() + hot_offset, entry_size);
+  } else {
+    remote_read_bytes(
+      rptr.memory_node(), hot_offset, previous.data(), previous.size(), 0);
+  }
+  const u32 previous_version = vamana::hot_graph::load_u32_le(
+    previous.data() + 12);
+  const bool previous_valid = (previous_version & 1u) == 0 &&
+    vamana::hot_graph::load_u16_le(previous.data() + 2) ==
+      vamana::hot_graph::checksum16(previous.data(), previous.size());
+  if (previous_valid) {
+    if (!generation_override.has_value()) {
+      generation = vamana::hot_graph::load_u32_le(previous.data() + 4);
+    }
+    if (!deleted_override.has_value()) {
+      deleted = (previous[1] & VamanaNode::HOT_GRAPH_DELETED) != 0;
+    }
+  } else {
+    byte_t prefix[VamanaNode::HEADER_SIZE +
+                  VamanaNode::COMPACT_META_SIZE]{};
     if (local_shard(rptr.memory_node())) {
-      std::memcpy(previous.data(),
-                  index_buffer_.get_full_buffer() + hot_offset, entry_size);
+      const u64 header = load_local_node_header_acquire(rptr);
+      std::memcpy(prefix, &header, sizeof(header));
+      std::memcpy(prefix + VamanaNode::HEADER_SIZE,
+                  index_buffer_.get_full_buffer() + rptr.byte_offset() +
+                    VamanaNode::HEADER_SIZE,
+                  VamanaNode::COMPACT_META_SIZE);
     } else {
       remote_read_bytes(
-        rptr.memory_node(), hot_offset, previous.data(), previous.size(), 0);
+        rptr.memory_node(), rptr.byte_offset(), prefix, sizeof(prefix), 0);
     }
-    const bool previous_valid =
-      vamana::hot_graph::load_u16_le(previous.data() + 2) ==
-        vamana::hot_graph::checksum16(previous.data(), previous.size());
-    if (previous_valid) {
-      if (!generation_override.has_value()) {
-        generation = vamana::hot_graph::load_u32_le(previous.data() + 4);
-      }
-      if (!deleted_override.has_value()) {
-        deleted =
-          (previous[1] & VamanaNode::HOT_GRAPH_DELETED) != 0;
-      }
-    } else {
-      byte_t prefix[VamanaNode::HEADER_SIZE +
-                    VamanaNode::COMPACT_META_SIZE]{};
-      if (local_shard(rptr.memory_node())) {
-        const u64 header = load_local_node_header_acquire(rptr);
-        std::memcpy(prefix, &header, sizeof(header));
-        std::memcpy(prefix + VamanaNode::HEADER_SIZE,
-                    index_buffer_.get_full_buffer() + rptr.byte_offset() +
-                      VamanaNode::HEADER_SIZE,
-                    VamanaNode::COMPACT_META_SIZE);
-      } else {
-        remote_read_bytes(
-          rptr.memory_node(), rptr.byte_offset(), prefix, sizeof(prefix), 0);
-      }
-      if (!deleted_override.has_value()) {
-        deleted = (*reinterpret_cast<const u64*>(prefix) &
-                   VamanaNode::HEADER_DELETED) != 0;
-      }
-      if (!generation_override.has_value()) {
-        generation = *reinterpret_cast<const u32*>(
-          prefix + VamanaNode::offset_generation());
-      }
+    if (!deleted_override.has_value()) {
+      deleted = (*reinterpret_cast<const u64*>(prefix) &
+                 VamanaNode::HEADER_DELETED) != 0;
+    }
+    if (!generation_override.has_value()) {
+      generation = *reinterpret_cast<const u32*>(
+        prefix + VamanaNode::offset_generation());
     }
   }
 
@@ -174,17 +173,37 @@ void MemoryNode::write_graph_adjacency(
       vamana::hot_graph::store_u16_le(entry.data() + 2, checksum);
     }
   }
+  const u32 publishing_version = (previous_version + 1) | 1u;
+  const u32 committed_version = publishing_version + 1;
+  vamana::hot_graph::store_u32_le(entry.data() + 12, publishing_version);
+  vamana::hot_graph::store_u16_le(
+    entry.data() + 2,
+    vamana::hot_graph::checksum16(entry.data(), entry_size));
   if (local_shard(rptr.memory_node())) {
-    // The graph and advisory tag share one publication copy.  The copy ends
-    // exactly where the PQ payload begins and therefore cannot corrupt it.
+    // Readers reject the odd publication version until the final even store.
     std::memcpy(index_buffer_.get_full_buffer() + hot_offset,
                 entry.data(), publication_size);
+  } else {
+    remote_write_bytes(
+      rptr.memory_node(), hot_offset, entry.data(), publication_size, 0);
+  }
+
+  vamana::hot_graph::store_u32_le(entry.data() + 12, committed_version);
+  const u16 committed_checksum =
+    vamana::hot_graph::checksum16(entry.data(), entry_size);
+  vamana::hot_graph::store_u16_le(entry.data() + 2, committed_checksum);
+  byte_t* target = index_buffer_.get_full_buffer() + hot_offset;
+  if (local_shard(rptr.memory_node())) {
+    std::atomic_ref<u16>(*reinterpret_cast<u16*>(target + 2)).store(
+      committed_checksum, std::memory_order_release);
+    std::atomic_ref<u32>(*reinterpret_cast<u32*>(target + 12)).store(
+      committed_version, std::memory_order_release);
     return;
   }
-  // One RDMA WRITE publishes graph + tag; no extra WQE/CQE/round trip is
-  // introduced for dynamic extent maintenance.
-  remote_write_bytes(
-    rptr.memory_node(), hot_offset, entry.data(), publication_size, 0);
+  remote_write_bytes(rptr.memory_node(), hot_offset + 2,
+                     entry.data() + 2, sizeof(committed_checksum), 0);
+  remote_write_bytes(rptr.memory_node(), hot_offset + 12,
+                     entry.data() + 12, sizeof(committed_version), 0);
 }
 
 void MemoryNode::dump_final_graph_for_audit() {

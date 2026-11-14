@@ -344,9 +344,10 @@ bool Stage2Worker::finish_stage2_after_reconcile(
     if (task.maintenance_sequence == 0) return true;
     const auto failed = [&](const char* reason) {
       static std::atomic<u32> debug_count{0};
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
-          std::chrono::steady_clock::now() - task.queued_at >
-            std::chrono::seconds(5) &&
+      const auto task_age = std::chrono::steady_clock::now() - task.queued_at;
+      if (((std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+            task_age > std::chrono::seconds(5)) ||
+           task_age > std::chrono::seconds(60)) &&
           debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
         std::cerr << "[stage2-finish-debug] self=" << node_.storage_id_
                   << " id=" << task.id

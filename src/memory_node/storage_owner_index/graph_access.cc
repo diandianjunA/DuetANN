@@ -3,6 +3,10 @@
 #include "memory_node/storage_owner_index/vector_snapshot_policy.hh"
 
 #include <cstdlib>
+#include <execinfo.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 using namespace memory_node_storage_owner_index_detail;
 
@@ -80,21 +84,56 @@ IncarnationLockResult MemoryNode::try_lock_node(RemotePtr rptr) {
           std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
         std::lock_guard<std::mutex> lock(debug_node_lock_owners_mutex_);
         debug_node_lock_owners_[rptr.raw_address] = std::this_thread::get_id();
+        debug_node_lock_owner_tids_[rptr.raw_address] =
+          static_cast<pid_t>(::syscall(SYS_gettid));
+        debug_node_lock_owner_workers_[rptr.raw_address] = {
+          current_storage_owner_thread_ == nullptr
+            ? std::numeric_limits<u32>::max()
+            : current_storage_owner_thread_->id,
+          current_storage_owner_maintenance_worker_};
+        if (debug_node_lock_backtraces_.size() < 128 &&
+            debug_node_lock_backtraces_.insert(rptr.raw_address).second) {
+          void* frames[16];
+          const int count = backtrace(frames, 16);
+          char** symbols = backtrace_symbols(frames, count);
+          if (symbols != nullptr) {
+            std::string trace;
+            for (int index = 2; index < count; ++index) {
+              trace += symbols[index];
+              if (index + 1 < count) trace += " | ";
+            }
+            std::cerr << "[node-lock-acquire] target=" << rptr.raw_address
+                      << " worker="
+                      << debug_node_lock_owner_workers_[rptr.raw_address].first
+                      << " maintenance="
+                      << debug_node_lock_owner_workers_[rptr.raw_address].second
+                      << " stack=" << trace << std::endl;
+          }
+          free(symbols);
+        }
       }
       return result;
     }
     std::this_thread::yield();
   }
   if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
-    static std::atomic<u32> debug_count{0};
-    if (debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
-      std::lock_guard<std::mutex> lock(debug_node_lock_owners_mutex_);
+    std::lock_guard<std::mutex> lock(debug_node_lock_owners_mutex_);
+    if (debug_node_lock_busy_logged_.insert(rptr.raw_address).second) {
       const auto owner = debug_node_lock_owners_.find(rptr.raw_address);
       std::cerr << "[node-lock-busy] target=" << rptr.raw_address;
       if (owner != debug_node_lock_owners_.end()) {
         std::cerr << " owner=" << owner->second;
       } else {
         std::cerr << " owner=untracked";
+      }
+      const auto owner_tid = debug_node_lock_owner_tids_.find(rptr.raw_address);
+      if (owner_tid != debug_node_lock_owner_tids_.end()) {
+        std::cerr << " owner_tid=" << owner_tid->second;
+      }
+      const auto owner_worker = debug_node_lock_owner_workers_.find(rptr.raw_address);
+      if (owner_worker != debug_node_lock_owner_workers_.end()) {
+        std::cerr << " owner_worker=" << owner_worker->second.first
+                  << " owner_maintenance=" << owner_worker->second.second;
       }
       std::cerr << std::endl;
     }

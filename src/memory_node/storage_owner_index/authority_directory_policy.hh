@@ -401,6 +401,12 @@ inline AuthorityCheckState check_authority_current(
     u32 generation,
     RemotePtr expected,
     u64 expected_placement_version) {
+  // A later committed generation is a durable stale proof. An even newer
+  // lease cannot restore this generation, so waiting for that lease can only
+  // deadlock completion-credit activation behind an older Stage2 descriptor.
+  if (state.exists && state.entry.generation > generation) {
+    return AuthorityCheckState::stale;
+  }
   if (state.lease.has_value()) {
     const AuthorityMutationLease& active = *state.lease;
     return same_authority_operation(active.operation, operation) &&
@@ -432,6 +438,12 @@ inline AuthorityRelocateState relocate_authority_if_current(
       (expected != desired &&
        expected_placement_version == std::numeric_limits<u64>::max())) {
     return AuthorityRelocateState::conflict;
+  }
+  // Resolve superseded work from the committed generation before honoring a
+  // later lease. The lease may need this Stage2's completion credit to activate
+  // its own cleanup; it can never make the older generation current again.
+  if (state.exists && state.entry.generation > generation) {
+    return AuthorityRelocateState::stale;
   }
   // A no-op Stage2 barrier does not change the directory. Once its own
   // operation has committed, a successor lease may coexist with that proof:

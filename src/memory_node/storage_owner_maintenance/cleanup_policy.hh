@@ -111,11 +111,20 @@ inline bool stage2_promotion_certificate_matches(
   return stable_edge_present && (!lease_merge || lease_present);
 }
 
-inline bool stage2_retired_target_cleanup_allowed(u64 header) {
+inline bool cleanup_reverse_target_is_terminal(u64 header) {
   return (header & (VamanaNode::HEADER_DELETED |
-                    VamanaNode::HEADER_RETIRING)) != 0 &&
-    (header & (VamanaNode::HEADER_PROVISIONAL |
-               VamanaNode::HEADER_STAGE2_FROZEN)) == 0;
+                    VamanaNode::HEADER_RETIRING)) != 0;
+}
+
+inline bool stage2_retired_target_cleanup_allowed(u64 header) {
+  return cleanup_reverse_target_is_terminal(header);
+}
+
+inline bool cleanup_reverse_target_is_reclaimed(
+    u32 expected_incarnation, u64 observed_header,
+    u32 observed_slot_incarnation) {
+  return VamanaNode::header_incarnation(observed_header) !=
+    expected_incarnation || observed_slot_incarnation != expected_incarnation;
 }
 
 inline bool certificate_release_can_bypass_target_lock(u64 header) {

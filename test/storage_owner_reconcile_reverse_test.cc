@@ -64,6 +64,53 @@ void test_stale_removal_distinguishes_terminal_identity_from_retry() {
   assert(!reconcile_stale_removal_completed(true, true, true, true));
 }
 
+void test_deleted_frozen_reverse_target_is_terminal() {
+  using memory_node_storage_owner_maintenance_detail::
+    cleanup_reverse_target_is_terminal;
+  assert(cleanup_reverse_target_is_terminal(
+    VamanaNode::HEADER_DELETED | VamanaNode::HEADER_STAGE2_FROZEN));
+  assert(cleanup_reverse_target_is_terminal(
+    VamanaNode::HEADER_RETIRING | VamanaNode::HEADER_STAGE2_FROZEN));
+  assert(cleanup_reverse_target_is_terminal(VamanaNode::HEADER_DELETED));
+  assert(cleanup_reverse_target_is_terminal(VamanaNode::HEADER_RETIRING));
+  assert(!cleanup_reverse_target_is_terminal(VamanaNode::HEADER_STAGE2_FROZEN));
+  assert(!cleanup_reverse_target_is_terminal(VamanaNode::HEADER_PROVISIONAL));
+  assert(!cleanup_reverse_target_is_terminal(0));
+  using memory_node_storage_owner_maintenance_detail::
+    stage2_retired_target_cleanup_allowed;
+  assert(stage2_retired_target_cleanup_allowed(
+    VamanaNode::HEADER_DELETED | VamanaNode::HEADER_STAGE2_FROZEN));
+  assert(stage2_retired_target_cleanup_allowed(
+    VamanaNode::HEADER_RETIRING | VamanaNode::HEADER_STAGE2_FROZEN));
+  assert(stage2_retired_target_cleanup_allowed(
+    VamanaNode::HEADER_DELETED | VamanaNode::HEADER_PROVISIONAL |
+    VamanaNode::HEADER_STAGE2_FROZEN));
+  assert(stage2_retired_target_cleanup_allowed(
+    VamanaNode::HEADER_RETIRING | VamanaNode::HEADER_PROVISIONAL |
+    VamanaNode::HEADER_STAGE2_FROZEN));
+  assert(!stage2_retired_target_cleanup_allowed(
+    VamanaNode::HEADER_STAGE2_FROZEN));
+  assert(!stage2_retired_target_cleanup_allowed(
+    VamanaNode::HEADER_PROVISIONAL));
+}
+
+void test_reclaimed_cleanup_target_is_an_idempotent_postcondition() {
+  using memory_node_storage_owner_maintenance_detail::
+    cleanup_reverse_target_is_reclaimed;
+  constexpr u32 incarnation = 72;
+  const u64 current = VamanaNode::make_header(
+    incarnation, VamanaNode::HEADER_CENTROID_ACCOUNTED);
+  assert(!cleanup_reverse_target_is_reclaimed(
+    incarnation, current | VamanaNode::HEADER_NODE_LOCK, incarnation));
+  assert(cleanup_reverse_target_is_reclaimed(
+    incarnation, VamanaNode::make_header(incarnation + 1), incarnation));
+  assert(cleanup_reverse_target_is_reclaimed(
+    incarnation, current, incarnation + 1));
+  assert(cleanup_reverse_target_is_reclaimed(incarnation, 0, 0));
+  assert(cleanup_reverse_target_is_reclaimed(incarnation, 0, incarnation));
+  assert(!cleanup_reverse_target_is_reclaimed(0, 0, 0));
+}
+
 void test_bounded_prune_rejection_is_a_terminal_ordinary_postcondition() {
   const RemotePtr target = pointer(0, 0x1000);
   const RemotePtr old_candidate = pointer(0, 0x2000);
@@ -1788,6 +1835,8 @@ void test_refinement_lock_conflict_is_retryable_per_operation() {
 }  // namespace
 
 int main() {
+  test_deleted_frozen_reverse_target_is_terminal();
+  test_reclaimed_cleanup_target_is_an_idempotent_postcondition();
   test_refinement_lock_conflict_is_retryable_per_operation();
   test_certificate_child_reclaim_requires_terminal_identity();
   test_certificate_parent_replacement_preserves_cleanup_state();

@@ -171,6 +171,24 @@ void MemoryNode::peer_rpc_progress_loop() {
               peer_id, slot_id, bytes, *header,
               &completion_target)) {
           if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+              (header->type == static_cast<u32>(
+                 service::storage_owner::PeerRpcType::reverse_update_response) ||
+               header->type == static_cast<u32>(
+                 service::storage_owner::PeerRpcType::cleanup_deleted_response))) {
+            static std::atomic<u32> debug_count{0};
+            if (debug_count.fetch_add(1, std::memory_order_relaxed) < 128) {
+              std::cerr << std::string("[reverse-response-drop] self=") +
+                std::to_string(storage_id_) + " source=" + std::to_string(peer_id) +
+                " request_id=" + std::to_string(header->request_id) +
+                " type=" + std::to_string(header->type) +
+                " items=" + std::to_string(header->item_count) +
+                " status=" + std::to_string(header->status) +
+                " registry_state=" + std::to_string(
+                  peer_async_responses_->debug_response_state(header->request_id))
+                        << std::endl;
+            }
+          }
+          if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
               header->type == static_cast<u32>(
                 service::storage_owner::PeerRpcType::cleanup_activate_response)) {
             static std::atomic<u32> debug_count{0};
@@ -196,6 +214,20 @@ void MemoryNode::peer_rpc_progress_loop() {
             bytes == expected_bytes) {
           const auto decision = peer_request_deduplicator_->begin(
             peer_id, *header, true);
+          if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+              decision.action != memory_node_detail::PeerRequestAction::execute &&
+              decision.action != memory_node_detail::PeerRequestAction::replay) {
+            static std::atomic<u32> debug_count{0};
+            if (debug_count.fetch_add(1, std::memory_order_relaxed) < 128) {
+              std::cerr << std::string("[reverse-dedup-debug] self=") +
+                std::to_string(storage_id_) + " source=" + std::to_string(peer_id) +
+                " request_id=" + std::to_string(header->request_id) +
+                " type=" + std::to_string(header->type) +
+                " items=" + std::to_string(header->item_count) +
+                " action=" + std::to_string(static_cast<u32>(decision.action))
+                        << std::endl;
+            }
+          }
           if (decision.action == memory_node_detail::PeerRequestAction::execute) {
             const auto* ops = service::storage_owner::reverse_update_ops(payload);
             PeerReverseUpdateTask task;
@@ -226,6 +258,20 @@ void MemoryNode::peer_rpc_progress_loop() {
             bytes == expected_bytes) {
           const auto decision = peer_request_deduplicator_->begin(
             peer_id, *header, true);
+          if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+              decision.action != memory_node_detail::PeerRequestAction::execute &&
+              decision.action != memory_node_detail::PeerRequestAction::replay) {
+            static std::atomic<u32> debug_count{0};
+            if (debug_count.fetch_add(1, std::memory_order_relaxed) < 128) {
+              std::cerr << std::string("[reverse-dedup-debug] self=") +
+                std::to_string(storage_id_) + " source=" + std::to_string(peer_id) +
+                " request_id=" + std::to_string(header->request_id) +
+                " type=" + std::to_string(header->type) +
+                " items=" + std::to_string(header->item_count) +
+                " action=" + std::to_string(static_cast<u32>(decision.action))
+                        << std::endl;
+            }
+          }
           if (decision.action == memory_node_detail::PeerRequestAction::execute) {
             const auto* ops = service::storage_owner::reverse_update_ops(payload);
             PeerReverseUpdateTask task;
@@ -801,6 +847,19 @@ void MemoryNode::peer_reverse_update_worker_loop(u32 worker_id) {
       processed_items, std::memory_order_relaxed);
     if (!success) {
       peer_reverse_update_failed_.fetch_add(1, std::memory_order_relaxed);
+      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+          !reconcile_request) {
+        static std::atomic<u32> debug_count{0};
+        if (debug_count.fetch_add(1, std::memory_order_relaxed) < 128) {
+          std::cerr << std::string("[reverse-handler-debug] self=") +
+            std::to_string(storage_id_) + " source=" +
+            std::to_string(tasks.front().source_shard) + " request_id=" +
+            std::to_string(tasks.front().header.request_id) + " type=" +
+            std::to_string(tasks.front().header.type) + " tasks=" +
+            std::to_string(tasks.size()) + " items=" +
+            std::to_string(processed_items) + " success=false" << std::endl;
+        }
+      }
     }
     size_t reconcile_result_offset = 0;
     for (const PeerReverseUpdateTask& task : tasks) {

@@ -50,6 +50,21 @@ bool MemoryNode::try_post_peer_rpc_request_attempt(
     : peer_async_responses_->register_send_attempt(
         request_id, target_shard, response_type, item_count,
         maintenance_wake_owner);
+  if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      (request_type == service::storage_owner::PeerRpcType::
+        reverse_update_request ||
+       request_type == service::storage_owner::PeerRpcType::
+        cleanup_deleted_request)) {
+    static std::atomic<u32> debug_count{0};
+    if (debug_count.fetch_add(1, std::memory_order_relaxed) < 128) {
+      std::cerr << std::string("[reverse-register-debug] self=") +
+        std::to_string(storage_id_) + " peer=" + std::to_string(target_shard) +
+        " request_id=" + std::to_string(request_id) + " response_type=" +
+        std::to_string(static_cast<u32>(response_type)) + " items=" +
+        std::to_string(item_count) + " registration=" +
+        std::to_string(static_cast<u32>(registration)) << std::endl;
+    }
+  }
   if (registration ==
       memory_node_detail::PeerResponseRegistration::already_complete) {
     return true;
@@ -57,11 +72,45 @@ bool MemoryNode::try_post_peer_rpc_request_attempt(
   if (registration !=
         memory_node_detail::PeerResponseRegistration::registered &&
       registration != memory_node_detail::PeerResponseRegistration::retry) {
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+        (request_type == service::storage_owner::PeerRpcType::
+          reverse_update_request ||
+         request_type == service::storage_owner::PeerRpcType::
+          cleanup_deleted_request)) {
+      static std::atomic<u32> debug_count{0};
+      if (debug_count.fetch_add(1, std::memory_order_relaxed) < 128) {
+        std::cerr << std::string("[reverse-send-debug] reason=registration self=") +
+          std::to_string(storage_id_) + " peer=" + std::to_string(target_shard) +
+          " request_id=" + std::to_string(request_id) +
+          " request_type=" + std::to_string(static_cast<u32>(request_type)) +
+          " response_type=" + std::to_string(static_cast<u32>(response_type)) +
+          " item_count=" + std::to_string(item_count) +
+          " registration=" + std::to_string(static_cast<u32>(registration)) +
+          " registry_state=" + std::to_string(
+            peer_async_responses_->debug_response_state(request_id))
+                  << std::endl;
+      }
+    }
     return false;
   }
 
   u32 slot_id = 0;
   if (!try_acquire_peer_rpc_send_slot(target_shard, send_class, slot_id)) {
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+        (request_type == service::storage_owner::PeerRpcType::
+          reverse_update_request ||
+         request_type == service::storage_owner::PeerRpcType::
+          cleanup_deleted_request)) {
+      static std::atomic<u32> debug_count{0};
+      if (debug_count.fetch_add(1, std::memory_order_relaxed) < 128) {
+        std::cerr << std::string("[reverse-send-debug] reason=send_slot self=") +
+          std::to_string(storage_id_) + " peer=" + std::to_string(target_shard) +
+          " request_id=" + std::to_string(request_id) +
+          " request_type=" + std::to_string(static_cast<u32>(request_type)) +
+          " item_count=" + std::to_string(item_count)
+                  << std::endl;
+      }
+    }
     return false;
   }
   const size_t offset = peer_rpc_async_send_offset(target_shard, slot_id);
@@ -331,6 +380,20 @@ bool MemoryNode::post_peer_op_batch_async(
     u32& item_count,
     const Configuration& config) {
   item_count = 0;
+  const auto rejected = [&](const char* reason) {
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      static std::atomic<u32> debug_count{0};
+      if (debug_count.fetch_add(1, std::memory_order_relaxed) < 128) {
+        std::cerr << std::string("[reverse-validate-debug] self=") +
+          std::to_string(storage_id_) + " peer=" +
+          std::to_string(target_shard) + " request_id=" +
+          std::to_string(request_id) + " type=" +
+          std::to_string(static_cast<u32>(request_type)) + " ops=" +
+          std::to_string(ops.size()) + " reason=" + reason << std::endl;
+      }
+    }
+    return false;
+  };
   if (ops.empty() || target_shard == storage_id_) return true;
   const bool reverse = request_type ==
     service::storage_owner::PeerRpcType::reverse_update_request;
@@ -338,19 +401,21 @@ bool MemoryNode::post_peer_op_batch_async(
     service::storage_owner::PeerRpcType::cleanup_deleted_request;
   if ((!reverse && !cleanup) || peer_async_responses_ == nullptr ||
       target_shard >= num_storage_nodes_ || request_id == 0) {
-    return false;
+    return rejected("invalid_request");
   }
 
   const u64 max_items = std::max<u64>(
     1, static_cast<u64>(config.R) * config.storage_owner_batch_max);
   if (ops.size() > max_items ||
       ops.size() > std::numeric_limits<u32>::max()) {
-    return false;
+    return rejected("too_many_items");
   }
   item_count = static_cast<u32>(ops.size());
   const size_t bytes = service::storage_owner::reverse_update_request_bytes(
     item_count);
-  if (bytes > peer_rpc_runtime_.message_bytes) return false;
+  if (bytes > peer_rpc_runtime_.message_bytes) {
+    return rejected("message_too_large");
+  }
 
   const auto response_type = cleanup
     ? service::storage_owner::PeerRpcType::cleanup_deleted_response

@@ -4,6 +4,7 @@
 #include <cstring>
 #include <limits>
 #include <vector>
+#include <iostream>
 
 #include "memory_node/peer_rpc/async_response.hh"
 
@@ -481,9 +482,57 @@ void test_dedup_inflight_capacity_and_high_churn_fifo() {
   assert(probes.max_probe < capacity / 2);
 }
 
+void test_response_registry_random_churn_never_loses_live_requests() {
+  constexpr auto type = protocol::PeerRpcType::cleanup_deleted_response;
+  detail::PeerAsyncResponseRegistry registry(32);
+  std::vector<u64> live;
+  u64 state = 0x6a09e667f3bcc909ULL;
+  const auto next = [&]() {
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    return state;
+  };
+  u64 next_id = 1;
+  for (size_t step = 0; step < 10000; ++step) {
+    if (live.size() < 8 || ((next() & 1) != 0 && live.size() < 24)) {
+      const u64 id = next_id++;
+      const u32 shard = static_cast<u32>(id % 4);
+      const u32 items = static_cast<u32>(id % 32 + 1);
+      const auto registration = registry.register_request(id, shard, type, items);
+      if (registration != detail::PeerResponseRegistration::registered) {
+        std::cerr << "unexpected registration=" << static_cast<u32>(registration)
+                  << " step=" << step << " id=" << id
+                  << " live=" << live.size() << std::endl;
+      }
+      assert(registration == detail::PeerResponseRegistration::registered);
+      assert(registry.debug_response_metadata(id).request_id == id);
+      live.push_back(id);
+    } else {
+      const size_t index = static_cast<size_t>(next() % live.size());
+      const u64 id = live[index];
+      assert(registry.debug_response_metadata(id).request_id == id);
+      (void)registry.cancel(id);
+      assert(registry.debug_response_metadata(id).state == -1);
+      live[index] = live.back();
+      live.pop_back();
+    }
+  }
+  for (const u64 id : live) {
+    const auto metadata = registry.debug_response_metadata(id);
+    assert(metadata.request_id == id);
+    assert(metadata.expected_shard == id % 4);
+    assert(metadata.expected_type == static_cast<u32>(type));
+    assert(metadata.expected_item_count == id % 32 + 1);
+    (void)registry.cancel(id);
+  }
+  assert(registry.size() == 0);
+}
+
 }  // namespace
 
 int main() {
+  test_response_registry_random_churn_never_loses_live_requests();
   test_registration_delivery_and_explicit_consumption();
   test_delivery_preserves_exact_maintenance_owner();
   test_owned_batch_delivery_is_atomic_and_generation_fenced();

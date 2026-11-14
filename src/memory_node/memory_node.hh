@@ -16,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <sys/types.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1429,6 +1430,10 @@ private:
     storage_owner_refinement_backpressure_{};
   std::mutex debug_node_lock_owners_mutex_;
   std::unordered_map<u64, std::thread::id> debug_node_lock_owners_;
+  std::unordered_map<u64, pid_t> debug_node_lock_owner_tids_;
+  std::unordered_map<u64, std::pair<u32, bool>> debug_node_lock_owner_workers_;
+  std::unordered_set<u64> debug_node_lock_busy_logged_;
+  std::unordered_set<u64> debug_node_lock_backtraces_;
   std::mutex debug_cleanup_active_requests_mutex_;
   std::unordered_map<std::thread::id,
     std::pair<u64, std::chrono::steady_clock::time_point>>

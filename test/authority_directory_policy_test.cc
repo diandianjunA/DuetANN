@@ -1,5 +1,6 @@
 #include <cassert>
 
+#include "common/sliding_completion_ring.hh"
 #include "memory_node/storage_owner_index/authority_directory_policy.hh"
 
 namespace detail = memory_node_storage_owner_index_detail;
@@ -342,6 +343,79 @@ void test_committed_stage2_barrier_progresses_under_successor_lease() {
          detail::AuthorityRelocateState::stale);
 }
 
+void test_superseded_stage2_terminates_under_later_successor_lease() {
+  const RemotePtr generation1 = pointer(3, 4096);
+  const RemotePtr generation2 = pointer(4, 8192);
+  const RemotePtr stale_relocation = pointer(5, 12288);
+  const detail::AuthorityOperationToken insert_operation{5, 0, 6001};
+  const detail::AuthorityOperationToken upsert_operation{6, 0, 6002};
+  const detail::AuthorityOperationToken erase_operation{7, 0, 6003};
+  detail::AuthorityDirectoryState state;
+
+  assert(detail::begin_authority_mutation(
+           state, MutationKind::insert, insert_operation, 3).state ==
+         detail::AuthorityBeginState::prepared);
+  assert(detail::commit_authority_mutation(
+           state, insert_operation, generation1, 1, false, 901) ==
+         detail::AuthorityCommitState::committed);
+  assert(detail::begin_authority_mutation(
+           state, MutationKind::upsert, upsert_operation, 4).state ==
+         detail::AuthorityBeginState::prepared);
+  assert(detail::commit_authority_mutation(
+           state, upsert_operation, generation2, 2, false, 902) ==
+         detail::AuthorityCommitState::committed);
+  assert(detail::begin_authority_mutation(
+           state, MutationKind::erase, erase_operation, 4).state ==
+         detail::AuthorityBeginState::prepared);
+  assert(state.lease.has_value());
+
+  bounded::SlidingCompletionRing completion(2);
+  const u64 generation1_stage2 = completion.try_reserve(1);
+  const u64 generation2_stage2 = completion.try_reserve(1);
+  assert(generation1_stage2 == 1);
+  assert(generation2_stage2 == 2);
+  assert(completion.try_reserve(1) == 0);
+  assert(completion.incomplete() == 2);
+
+  // Generation 2 is already authority-committed, so generation 1 can never
+  // become current again, regardless of whether generation 3 commits or aborts.
+  // A busy result deadlocks a full completion window when the old Stage2 holds
+  // the physical slot needed to activate generation 3's cleanup.
+  assert(detail::relocate_authority_if_current(
+           state, insert_operation, 1, generation1, generation1, 1) ==
+         detail::AuthorityRelocateState::stale);
+  assert(detail::relocate_authority_if_current(
+           state, insert_operation, 1, generation1, stale_relocation, 1) ==
+         detail::AuthorityRelocateState::stale);
+  assert(detail::check_authority_current(
+           state, insert_operation, 1, generation1, 1) ==
+         detail::AuthorityCheckState::stale);
+
+  completion.complete(generation1_stage2);
+  const u64 erase_cleanup = completion.try_reserve(1);
+  assert(erase_cleanup == 3);
+  assert(completion.finalized() == 1);
+
+  // The current generation may still finish its read-only Stage2 barrier. Its
+  // completion and the activated cleanup must both finish before the ring can
+  // report a fully drained durable watermark.
+  assert(detail::relocate_authority_if_current(
+           state, upsert_operation, 2, generation2, generation2, 2) ==
+         detail::AuthorityRelocateState::committed);
+  assert(state.lease.has_value());
+  completion.complete(generation2_stage2);
+  assert(detail::commit_authority_mutation(
+           state, erase_operation, RemotePtr{}, 3, true, erase_cleanup) ==
+         detail::AuthorityCommitState::committed);
+  completion.complete(erase_cleanup);
+  assert(completion.finalized() == erase_cleanup);
+  assert(completion.incomplete() == 0);
+  assert(completion.outstanding() == 0);
+  assert(detail::relocate_authority_if_current(
+           state, upsert_operation, 2, generation2, generation2, 2) ==
+         detail::AuthorityRelocateState::stale);
+}
+
 void test_cleanup_retirement_barrier_waits_for_linearization() {
   const RemotePtr base_generation = pointer(2, 4096);
   const RemotePtr successor_generation = pointer(4, 8192);
@@ -397,6 +471,7 @@ int main() {
   test_abort_releases_old_stage2_without_corrupting_directory();
   test_relocation_is_versioned_and_idempotent();
   test_committed_stage2_barrier_progresses_under_successor_lease();
+  test_superseded_stage2_terminates_under_later_successor_lease();
   test_cleanup_retirement_barrier_waits_for_linearization();
   return 0;
 }

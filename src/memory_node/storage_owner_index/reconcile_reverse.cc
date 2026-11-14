@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
+#include <string>
 
 using namespace memory_node_storage_owner_index_detail;
 
@@ -67,6 +69,11 @@ bool MemoryNode::reconcile_local_reverse_ops(
     }
   }
   if (lease_merge) return reconcile_lease_merge_ops(ops, config, results);
+  if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    std::cerr << std::string("[reconcile-stage] self=") +
+      std::to_string(storage_id_) + " mode=one_sided ops=" +
+      std::to_string(ops.size()) << std::endl;
+  }
   return reconcile_reverse_ops_one_sided(ops, config, results);
 }
 
@@ -170,6 +177,11 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
         vector.size <= mn_memory_bytes_ - vector.offset;
     };
 
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      std::cerr << std::string("[reconcile-stage] self=") +
+        std::to_string(storage_id_) + " target=" +
+        std::to_string(target_raw) + " point=before_lock" << std::endl;
+    }
     const IncarnationLockResult target_lock = try_lock_node(target);
     if (target_lock == IncarnationLockResult::stale) {
       // The operation names a retired physical identity. Never acquire or
@@ -354,7 +366,12 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
         // reconciliation operations delimit compatible ordinary-add runs;
         // this keeps mandatory/removal operation boundaries intact while
         // collapsing the common hot-target fan-in case to one RobustPrune.
-        const size_t run_end = reconcile_reverse_add_run_end(
+        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        std::cerr << std::string("[reconcile-stage] self=") +
+          std::to_string(storage_id_) + " target=" +
+          std::to_string(target_raw) + " point=before_snapshot" << std::endl;
+      }
+      const size_t run_end = reconcile_reverse_add_run_end(
           ops, execution_indices, group_position);
         lib_assert(run_end > group_position,
                    "ordinary reverse add produced an empty compatible run");
@@ -508,6 +525,11 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
       !same_reconcile_neighbors(before_stable, adjacency.stable) ||
       !same_reconcile_neighbors(before_provisional,
                                 adjacency.provisional);
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      std::cerr << std::string("[reconcile-stage] self=") +
+        std::to_string(storage_id_) + " target=" +
+        std::to_string(target_raw) + " point=before_unlock" << std::endl;
+    }
     if (publish_allowed && changed) {
       write_graph_adjacency(target, adjacency.stable,
                             adjacency.provisional,

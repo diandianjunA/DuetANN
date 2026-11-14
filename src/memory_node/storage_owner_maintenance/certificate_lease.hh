@@ -9,6 +9,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -24,7 +25,9 @@ enum class CertificateAcquireResult : std::uint8_t {
 };
 
 // Target-local ownership of the stable incoming edges that must survive until
-// every temporary bridge for the same child has been removed. The table only
+// every temporary bridge for the same child has been removed. Independent
+// cleanup sequences can protect the same child concurrently; releasing one
+// sequence must not remove another sequence's protection. The table only
 // stores protocol state; graph adjacency remains authoritative for the edge.
 class CertificateLeaseTable {
  public:
@@ -52,13 +55,14 @@ class CertificateLeaseTable {
     auto& target = leases_[target_raw];
     const auto found = target.find(child_raw);
     if (found != target.end()) {
-      return found->second == sequence ? CertificateAcquireResult::replay
-                                       : CertificateAcquireResult::conflict;
+      return found->second.insert(sequence).second
+        ? CertificateAcquireResult::acquired
+        : CertificateAcquireResult::replay;
     }
     if (target.size() >= degree_limit_) {
       return CertificateAcquireResult::capacity_exhausted;
     }
-    target.emplace(child_raw, sequence);
+    target.emplace(child_raw, SequenceSet{sequence});
     ++size_;
     return CertificateAcquireResult::acquired;
   }
@@ -74,9 +78,9 @@ class CertificateLeaseTable {
       const std::vector<std::pair<std::uint64_t, std::uint64_t>>& released) {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto existing = leases_.find(target_raw);
-    std::unordered_map<std::uint64_t, std::uint64_t> updated =
+    std::unordered_map<std::uint64_t, SequenceSet> updated =
       existing == leases_.end()
-        ? std::unordered_map<std::uint64_t, std::uint64_t>{}
+        ? std::unordered_map<std::uint64_t, SequenceSet>{}
         : existing->second;
     const auto existing_released = released_.find(target_raw);
     std::unordered_map<std::uint64_t, std::uint64_t> completed =
@@ -86,8 +90,14 @@ class CertificateLeaseTable {
     for (const auto& [child, sequence] : released) {
       const auto found = updated.find(child);
       if (found != updated.end()) {
-        if (sequence != 0 && found->second != sequence) continue;
-        updated.erase(found);
+        if (sequence == 0) {
+          updated.erase(found);
+        } else {
+          const auto active = found->second.find(sequence);
+          if (active == found->second.end()) continue;
+          found->second.erase(active);
+          if (found->second.empty()) updated.erase(found);
+        }
       }
       const auto [position, inserted] = completed.emplace(child, sequence);
       if (!inserted) position->second = std::max(position->second, sequence);
@@ -100,11 +110,10 @@ class CertificateLeaseTable {
         continue;
       }
       const auto found = updated.find(child);
-      if (found != updated.end() && found->second != sequence) return false;
       if (found == updated.end() && updated.size() >= degree_limit_) {
         return false;
       }
-      updated[child] = sequence;
+      updated[child].insert(sequence);
     }
     if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
       const auto trace = [&](const char* action, std::uint64_t child,
@@ -114,8 +123,10 @@ class CertificateLeaseTable {
           action + " target=" + std::to_string(target_raw) +
           " child=" + std::to_string(child) +
           " sequence=" + std::to_string(sequence) + " remaining=";
-        message += found == updated.end() ? std::to_string(-1)
-                                         : std::to_string(found->second);
+        message += found == updated.end()
+          ? std::to_string(-1)
+          : std::to_string(*std::max_element(
+              found->second.begin(), found->second.end()));
         std::cerr << message << std::endl;
       };
       for (const auto& [child, sequence] : acquired) {
@@ -180,7 +191,7 @@ class CertificateLeaseTable {
     if (target == leases_.end()) return false;
     const auto found = target->second.find(child_raw);
     return found != target->second.end() &&
-      (sequence == 0 || found->second == sequence);
+      (sequence == 0 || found->second.contains(sequence));
   }
 
   std::size_t active_at(std::uint64_t target_raw) const {
@@ -196,8 +207,9 @@ class CertificateLeaseTable {
     const auto target = leases_.find(target_raw);
     if (target == leases_.end()) return result;
     result.reserve(target->second.size());
-    for (const auto& [child, sequence] : target->second) {
-      result.emplace_back(child, sequence);
+    for (const auto& [child, sequences] : target->second) {
+      result.emplace_back(child, *std::max_element(
+        sequences.begin(), sequences.end()));
     }
     std::sort(result.begin(), result.end());
     return result;
@@ -208,8 +220,10 @@ class CertificateLeaseTable {
     std::vector<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>> result;
     result.reserve(size_);
     for (const auto& [target, children] : leases_) {
-      for (const auto& [child, sequence] : children) {
-        result.emplace_back(target, child, sequence);
+      for (const auto& [child, sequences] : children) {
+        for (const auto sequence : sequences) {
+          result.emplace_back(target, child, sequence);
+        }
       }
     }
     std::sort(result.begin(), result.end());
@@ -230,10 +244,12 @@ class CertificateLeaseTable {
   }
 
  private:
+  using SequenceSet = std::unordered_set<std::uint64_t>;
+
   std::size_t degree_limit_;
   mutable std::mutex mutex_;
   std::unordered_map<std::uint64_t,
-                     std::unordered_map<std::uint64_t, std::uint64_t>> leases_;
+                     std::unordered_map<std::uint64_t, SequenceSet>> leases_;
   std::unordered_map<std::uint64_t,
                      std::unordered_map<std::uint64_t, std::uint64_t>> released_;
   std::uint64_t finalized_sequence_{};

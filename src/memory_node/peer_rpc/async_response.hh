@@ -12,6 +12,10 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+#include <atomic>
+#include <cstdlib>
+#include <iostream>
+#include <string>
 
 #include "common/types.hh"
 #include "memory_node/storage_owner_maintenance/ready_context_queue.hh"
@@ -78,6 +82,14 @@ struct PeerResponseDescriptor {
   size_t bytes{};
   service::storage_owner::PeerRpcHeader header{};
   bool owned_payload{};
+};
+
+struct PeerResponseDebugMetadata {
+  int state{-1};
+  u64 request_id{};
+  u32 expected_shard{};
+  u32 expected_type{};
+  u32 expected_item_count{};
 };
 
 struct PeerResponseCompletionTarget {
@@ -148,6 +160,21 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     const size_t slot_index = find_slot_locked(request_id);
     return slot_index == npos ? -1 : static_cast<int>(slots_[slot_index].state);
+  }
+
+  [[nodiscard]] PeerResponseDebugMetadata debug_response_metadata(
+      u64 request_id) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const size_t slot_index = find_slot_locked(request_id);
+    if (slot_index == npos) return {};
+    const Slot& slot = slots_[slot_index];
+    return PeerResponseDebugMetadata{
+      .state = static_cast<int>(slot.state),
+      .request_id = slot.request_id,
+      .expected_shard = slot.expected_shard,
+      .expected_type = static_cast<u32>(slot.expected_type),
+      .expected_item_count = slot.expected_item_count,
+    };
   }
 
   PeerResponseRegistration register_request(
@@ -409,6 +436,22 @@ public:
     if (slot_index == npos) return std::nullopt;
     Slot& slot = slots_[slot_index];
     if (slot.state == State::consuming) return std::nullopt;
+
+    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+        (slot.expected_type == service::storage_owner::PeerRpcType::
+          reverse_update_response ||
+         slot.expected_type == service::storage_owner::PeerRpcType::
+          cleanup_deleted_response)) {
+      static std::atomic<u32> debug_count{0};
+      if (debug_count.fetch_add(1, std::memory_order_relaxed) < 128) {
+        std::cerr << std::string("[reverse-cancel-debug] request_id=") +
+          std::to_string(request_id) + " expected_shard=" +
+          std::to_string(slot.expected_shard) + " expected_type=" +
+          std::to_string(static_cast<u32>(slot.expected_type)) +
+          " expected_items=" + std::to_string(slot.expected_item_count) +
+          " state=" + std::to_string(static_cast<int>(slot.state)) << std::endl;
+      }
+    }
 
     std::optional<PeerResponseDescriptor> response;
     if (slot.state == State::complete && slot.receive_descriptor_held) {

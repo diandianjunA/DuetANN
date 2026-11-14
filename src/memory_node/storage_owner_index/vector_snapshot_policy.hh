@@ -24,6 +24,10 @@ inline StableNodeSnapshotState classify_physical_node_snapshot(
     u64 before,
     u64 after,
     u32 slot_incarnation) {
+  if (VamanaNode::header_incarnation(before) != pointer.incarnation() &&
+      VamanaNode::header_incarnation(after) != pointer.incarnation()) {
+    return StableNodeSnapshotState::terminal;
+  }
   const bool same_unlocked_header = before == after &&
     (after & VamanaNode::HEADER_NODE_LOCK) == 0;
   if (!same_unlocked_header) {

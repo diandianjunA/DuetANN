@@ -226,6 +226,22 @@ int main() {
   assert(VamanaNode::decode_hot_graph_entry(
     compact_graph.data(), decoded_graph.data(), 0));
 
+  std::vector<byte_t> in_progress_graph = compact_graph;
+  vamana::hot_graph::store_u32_le(in_progress_graph.data() + 12, 1);
+  vamana::hot_graph::store_u16_le(
+    in_progress_graph.data() + 2,
+    vamana::hot_graph::checksum16(
+      in_progress_graph.data(), in_progress_graph.size()));
+  assert(!VamanaNode::decode_hot_graph_entry(
+    in_progress_graph.data(), decoded_graph.data(), 0));
+  vamana::hot_graph::store_u32_le(in_progress_graph.data() + 12, 2);
+  vamana::hot_graph::store_u16_le(
+    in_progress_graph.data() + 2,
+    vamana::hot_graph::checksum16(
+      in_progress_graph.data(), in_progress_graph.size()));
+  assert(VamanaNode::decode_hot_graph_entry(
+    in_progress_graph.data(), decoded_graph.data(), 0));
+
   std::vector<byte_t> reserved_flag_graph = compact_graph;
   reserved_flag_graph[1] |= 0x02u;
   vamana::hot_graph::store_u16_le(

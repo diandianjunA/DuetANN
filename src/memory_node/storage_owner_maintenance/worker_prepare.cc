@@ -1028,7 +1028,9 @@ bool Stage2Worker::prepare_cleanup_reverse(Stage2Context& context) {
     const auto failed = [&](const char* reason,
                             const StorageOwnerMaintenanceTask& task) {
       static std::atomic<u32> debug_count{0};
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      const auto task_age = std::chrono::steady_clock::now() - task.queued_at;
+      if ((std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr ||
+           task_age > std::chrono::seconds(60)) &&
           debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
         std::cerr << "[cleanup-prepare-debug] self=" << node_.storage_id_
                   << " worker=" << worker_id_ << " reason=" << reason
@@ -1133,11 +1135,15 @@ bool Stage2Worker::prepare_cleanup_reverse(Stage2Context& context) {
         task.maintenance_sequence = 0;
         continue;
       }
-      if (quiesce_result == CleanupParentQuiesceResult::busy ||
-          !reparent_cleanup_children(task)) {
+      if (quiesce_result == CleanupParentQuiesceResult::busy) {
         node_.storage_owner_maintenance_pressure_yields_.fetch_add(
           1, std::memory_order_relaxed);
-        return failed("parent_quiesce_or_reparent", task);
+        return failed("parent_quiesce", task);
+      }
+      if (!reparent_cleanup_children(task)) {
+        node_.storage_owner_maintenance_pressure_yields_.fetch_add(
+          1, std::memory_order_relaxed);
+        return failed("reparent", task);
       }
     }
 

@@ -596,21 +596,43 @@ bool MemoryNode::mark_node_deleted(RemotePtr rptr, u32 generation) {
     remote_write_bytes(rptr.memory_node(), header_addr.offset, &header, sizeof(header), 0);
   }
   const u64 hot_offset = VamanaNode::hot_graph_entry_offset(rptr);
+  vec<byte_t> entry(VamanaNode::hot_graph_entry_size(), 0);
   if (local_shard(rptr.memory_node())) {
-    byte_t* entry = index_buffer_.get_full_buffer() + hot_offset;
-    entry[1] |= VamanaNode::HOT_GRAPH_DELETED;
-    vamana::hot_graph::store_u32_le(entry + 4, generation);
-    const u16 checksum =
-      vamana::hot_graph::checksum16(entry, VamanaNode::hot_graph_entry_size());
-    vamana::hot_graph::store_u16_le(entry + 2, checksum);
+    std::memcpy(entry.data(), index_buffer_.get_full_buffer() + hot_offset,
+                entry.size());
   } else {
-    vec<byte_t> entry(VamanaNode::hot_graph_entry_size(), 0);
     remote_read_bytes(rptr.memory_node(), hot_offset, entry.data(), entry.size(), 0);
-    entry[1] |= VamanaNode::HOT_GRAPH_DELETED;
-    vamana::hot_graph::store_u32_le(entry.data() + 4, generation);
-    const u16 checksum = vamana::hot_graph::checksum16(entry.data(), entry.size());
-    vamana::hot_graph::store_u16_le(entry.data() + 2, checksum);
+  }
+  const u32 previous_version = vamana::hot_graph::load_u32_le(entry.data() + 12);
+  const u32 publishing_version = (previous_version + 1) | 1u;
+  const u32 committed_version = publishing_version + 1;
+  entry[1] |= VamanaNode::HOT_GRAPH_DELETED;
+  vamana::hot_graph::store_u32_le(entry.data() + 4, generation);
+  vamana::hot_graph::store_u32_le(entry.data() + 12, publishing_version);
+  vamana::hot_graph::store_u16_le(
+    entry.data() + 2,
+    vamana::hot_graph::checksum16(entry.data(), entry.size()));
+  if (local_shard(rptr.memory_node())) {
+    std::memcpy(index_buffer_.get_full_buffer() + hot_offset,
+                entry.data(), entry.size());
+  } else {
     remote_write_bytes(rptr.memory_node(), hot_offset, entry.data(), entry.size(), 0);
+  }
+  vamana::hot_graph::store_u32_le(entry.data() + 12, committed_version);
+  const u16 committed_checksum =
+    vamana::hot_graph::checksum16(entry.data(), entry.size());
+  vamana::hot_graph::store_u16_le(entry.data() + 2, committed_checksum);
+  if (local_shard(rptr.memory_node())) {
+    byte_t* target = index_buffer_.get_full_buffer() + hot_offset;
+    std::atomic_ref<u16>(*reinterpret_cast<u16*>(target + 2)).store(
+      committed_checksum, std::memory_order_release);
+    std::atomic_ref<u32>(*reinterpret_cast<u32*>(target + 12)).store(
+      committed_version, std::memory_order_release);
+  } else {
+    remote_write_bytes(rptr.memory_node(), hot_offset + 2,
+                       entry.data() + 2, sizeof(committed_checksum), 0);
+    remote_write_bytes(rptr.memory_node(), hot_offset + 12,
+                       entry.data() + 12, sizeof(committed_version), 0);
   }
   if (locked) {
     unlock_node(rptr);

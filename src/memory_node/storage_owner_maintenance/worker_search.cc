@@ -1,35 +1,42 @@
 #include "memory_node/storage_owner_maintenance/worker_internal.hh"
 
 #include <cstdlib>
+#include <syncstream>
 
 namespace memory_node_storage_owner_maintenance_detail {
 
 Stage2SearchAdvanceResult Stage2Worker::prepare_local(Stage2Context& context) {
+    const bool trace_search =
+      std::getenv("DVSTOR_SEARCH_STALL_DEBUG") != nullptr;
     const auto debug_wait = [&](const char* reason,
                                 const StorageOwnerMaintenanceTask& task,
                                 u64 header = 0) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") == nullptr ||
-          std::chrono::steady_clock::now() - task.queued_at <=
-            std::chrono::seconds(5)) {
+      const auto age = std::chrono::steady_clock::now() - task.queued_at;
+      if ((!trace_search && std::getenv("DVSTOR_STAGE2_STALL_DEBUG") == nullptr) ||
+          age <= std::chrono::seconds(trace_search ? 5 : 60)) {
         return;
       }
-      static std::atomic<u32> debug_count{0};
-      if (debug_count.fetch_add(1, std::memory_order_relaxed) >= 64) return;
-      std::cerr << "[stage2-search-wait] reason=" << reason
+      thread_local u64 last_log_ns = 0;
+      const u64 now_ns = steady_now_ns();
+      if (now_ns - last_log_ns < 10'000'000'000ull) return;
+      last_log_ns = now_ns;
+      std::osyncstream(std::cerr) << "[stage2-search-wait] reason=" << reason
                 << " worker=" << worker_id_
                 << " id=" << task.id
                 << " sequence=" << task.maintenance_sequence
                 << " target=" << task.target.raw_address
                 << " header=" << header << std::endl;
     };
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+    if ((trace_search || std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) &&
         !context.tasks.empty() &&
         std::chrono::steady_clock::now() - context.tasks.front().queued_at >
           std::chrono::seconds(5)) {
-      static std::atomic<u32> debug_count{0};
-      if (debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
+      thread_local u64 last_log_ns = 0;
+      const u64 now_ns = steady_now_ns();
+      if (now_ns - last_log_ns >= 10'000'000'000ull) {
+        last_log_ns = now_ns;
         const auto& io = context.search_io;
-        std::cerr << "[stage2-search-state] worker=" << worker_id_
+        std::osyncstream(std::cerr) << "[stage2-search-state] worker=" << worker_id_
                   << " input_prepared=" << context.search_input_prepared
                   << " started_ns=" << context.search_started_ns
                   << " initialized=" << io.initialized
@@ -52,7 +59,7 @@ Stage2SearchAdvanceResult Stage2Worker::prepare_local(Stage2Context& context) {
         context.search_started_ns != 0 &&
         steady_now_ns() - context.search_started_ns > 10'000'000'000ull) {
       context.search_stall_diagnostic_emitted = true;
-      std::cerr << "[storage-owner] Stage2 continuation stalled"
+      std::osyncstream(std::cerr) << "[storage-owner] Stage2 continuation stalled"
                 << " shard=" << node_.storage_id_
                 << " context=" << context.handle.slot
                 << " score_phase="
@@ -119,7 +126,10 @@ Stage2SearchAdvanceResult Stage2Worker::prepare_local(Stage2Context& context) {
 
       if (!context.tasks.empty()) {
         const vec<RemotePtr> entries = node_.local_centroid_route_entries();
-        if (entries.empty()) return Stage2SearchAdvanceResult::waiting_rdma;
+        if (entries.empty()) {
+          debug_wait("route_entries_empty", context.tasks.front());
+          return Stage2SearchAdvanceResult::waiting_rdma;
+        }
         const bool reuse_beam = storage_owner_reuse_stage1_beam();
         for (size_t item = 0; item < context.tasks.size(); ++item) {
           StorageOwnerMaintenanceTask& task = context.tasks[item];
@@ -225,7 +235,7 @@ void Stage2Worker::terminate_stuck_stage2(Stage2Context& context) {
         const u32 log_index =
           terminate_cleanup_logs.fetch_add(1, std::memory_order_relaxed);
         if (log_index < 16) {
-          std::cerr << "[storage-owner] stage2 termination cleanup incomplete"
+          std::osyncstream(std::cerr) << "[storage-owner] stage2 termination cleanup incomplete"
                     << " self_shard=" << node_.storage_id_
                     << " sequence=" << task.maintenance_sequence
                     << " id=" << task.id
