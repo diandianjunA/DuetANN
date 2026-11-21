@@ -43,7 +43,7 @@ struct GraphFetchCycleBreakdown {
   u64 completion_groups{};
 };
 
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
 __device__ __forceinline__ void record_owner_watchdog_counter(
   unsigned long long* counter) {
   if (counter == nullptr) return;
@@ -81,7 +81,7 @@ __device__ f32 exact_storage_distance(const PersistentKernelParams& params,
 __device__ i32 direct_fetch(const PersistentKernelParams& params,
                             u32 memory_node, u64 remote_offset, u8* destination,
                             u32 bytes, u32 lane) {
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
   if (memory_node >= params.direct_region_count ||
       params.direct_qps == nullptr || params.direct_regions == nullptr ||
       params.direct_qp_locks == nullptr ||
@@ -178,7 +178,7 @@ __device__ i32 direct_fetch_batch(
   const u32* request_bytes = nullptr,
   DirectBatchPriority priority = DirectBatchPriority::critical,
   bool nonblocking_enqueue = false, u32 prepared_matching = UINT32_MAX) {
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
   if (request_shards == nullptr || remote_offsets == nullptr ||
       request_count == 0 || request_count > UINT16_MAX || bytes == 0 ||
       bytes > DOCA_GPUNETIO_VERBS_MAX_TRANSFER_SIZE) {
@@ -430,7 +430,7 @@ __device__ i32 direct_fetch_split_batch(
   u64* critical_completion_timestamp_ns, i32* speculative_completion,
   u64* speculative_completion_timestamp_ns, const u32* request_bytes,
   u8 descriptor_flags = 0) {
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
   const bool exact_snapshot_tail =
     (descriptor_flags & kDirectBatchFlagMandatoryFencedTail) != 0;
   const bool mixed_mandatory_tail =
@@ -623,7 +623,7 @@ __device__ __forceinline__ i32 direct_fetch_fenced_snapshot_batch(
 
 __device__ i32 wait_direct_batch(const PersistentKernelParams& params,
                                  i32* owner_completion) {
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
   if (owner_completion == nullptr) return -EINVAL;
   for (;;) {
     const i32 status = *reinterpret_cast<volatile i32*>(owner_completion);

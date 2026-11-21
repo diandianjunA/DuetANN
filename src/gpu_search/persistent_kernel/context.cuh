@@ -13,8 +13,8 @@
 #include <cmath>
 #include <cstdint>
 
-#ifdef DVSTOR_HAVE_GPUNETIO
-#if !defined(IBV_WC_DRIVER1) && !defined(DVSTOR_HAVE_IBV_WC_DRIVER1)
+#ifdef DUETANN_HAVE_GPUNETIO
+#if !defined(IBV_WC_DRIVER1) && !defined(DUETANN_HAVE_IBV_WC_DRIVER1)
 #define IBV_WC_DRIVER1 135
 #define IBV_WC_DRIVER2 136
 #define IBV_WC_DRIVER3 137
@@ -37,13 +37,13 @@ inline constexpr u32 kApproximateSortCapacityWide =
 inline constexpr u32 kApproximateSortCapacityCompactPass =
   kApproximateSortThreadsCompact * kApproximateSortItemsCompactPass;
 
-#if DVSTOR_PERSISTENT_WIDE_SORT
+#if DUETANN_PERSISTENT_WIDE_SORT
 using ApproximateBlockSortWide = cub::BlockRadixSort<
   f32, kApproximateSortThreadsWide, kApproximateSortItemsWide, u64>;
 using ApproximateBlockSortWideRun = cub::BlockRadixSort<
   f32, kApproximateSortThreadsWide, kApproximateSortItemsWideRun, u64>;
 #endif
-#if DVSTOR_PERSISTENT_LEGACY_MERGE
+#if DUETANN_PERSISTENT_LEGACY_MERGE
 using ApproximateBlockSortCompactPass = cub::BlockRadixSort<
   f32, kApproximateSortThreadsCompact, kApproximateSortItemsCompactPass, u64>;
 using ApproximateBlockSortCompactFinal = cub::BlockRadixSort<

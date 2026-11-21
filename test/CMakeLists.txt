@@ -1,4 +1,4 @@
-include(DvstorTestHelpers)
+include(DuetANNTestHelpers)
 include(core_tests.cmake)
 include(offline_tests.cmake)
 include(benchmark_tests.cmake)

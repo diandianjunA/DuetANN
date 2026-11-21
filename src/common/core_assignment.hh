@@ -64,12 +64,12 @@ private:
   }
 
   void apply_local_process_partition() {
-    const auto rank = read_partition_environment("DVSTOR_LOCAL_PROCESS_RANK");
-    const auto count = read_partition_environment("DVSTOR_LOCAL_PROCESS_COUNT");
+    const auto rank = read_partition_environment("DUETANN_LOCAL_PROCESS_RANK");
+    const auto count = read_partition_environment("DUETANN_LOCAL_PROCESS_COUNT");
     if (!rank.has_value() && !count.has_value()) return;
     if (!rank.has_value() || !count.has_value() || *count == 0 || *rank >= *count) {
       throw std::invalid_argument(
-        "DVSTOR_LOCAL_PROCESS_RANK/COUNT must describe one valid partition");
+        "DUETANN_LOCAL_PROCESS_RANK/COUNT must describe one valid partition");
     }
     local_process_rank_ = *rank;
     local_process_count_ = *count;

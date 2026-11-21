@@ -18,7 +18,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
 
   const auto debug_failure = [&](const char* reason,
                                  const service::storage_owner::ReconcileReverseOp& op) {
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") == nullptr) return;
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") == nullptr) return;
     static std::atomic<u32> debug_count{0};
     if (debug_count.fetch_add(1, std::memory_order_relaxed) >= 128) return;
     std::string message = "[lease-input-debug] reason=" +
@@ -134,7 +134,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
       }
       continue;
     }
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       std::cerr << std::string("[reconcile-stage] self=") +
         std::to_string(storage_id_) + " target=" +
         std::to_string(target_raw) + " point=before_lease_lock" << std::endl;
@@ -149,7 +149,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
       continue;
     }
     if (lock == IncarnationLockResult::busy) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         static std::atomic<u32> debug_count{0};
         if (debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
           std::cerr << "[stage2-lease-failure] reason=lock_busy"
@@ -186,7 +186,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
     u32 target_generation = 0;
     if (!read_locked_node_identity(
           target, target_header, target_id, target_generation)) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         static std::atomic<u32> debug_count{0};
         if (debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
           std::cerr << "[stage2-lease-failure] reason=identity_read"
@@ -209,7 +209,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
     }
     GraphAdjacency adjacency;
     if (!read_graph_adjacency(target, adjacency)) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         std::cerr << "[stage2-cleanup-debug] target=" << target.raw_address
                   << " header=" << target_header << " id=" << target_id
                   << " generation=" << target_generation
@@ -282,7 +282,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
       if (child_state == CertificateLeaseChildState::live) continue;
       if (child_state == CertificateLeaseChildState::terminal) {
         expired_leases.emplace_back(child, sequence);
-        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
           std::cerr << "[stage2-lease-reclaim] target=" << target.raw_address
                     << " child=" << child.raw_address
                     << " sequence=" << sequence
@@ -290,7 +290,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
         }
         continue;
       }
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         std::cerr << "[stage2-lease-child-debug] target=" << target.raw_address
                   << " child=" << child.raw_address
                   << " sequence=" << sequence
@@ -343,7 +343,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
           if (terminal) {
             terminal_removals[index] = 1;
           } else if (!snapshot_read) {
-            if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+            if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
               std::cerr << "[stage2-cleanup-debug] target=" << target.raw_address
                         << " header=" << target_header << " id=" << target_id
                         << " generation=" << target_generation
@@ -383,7 +383,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
       }
     }
     if (!identities_valid) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         static std::atomic<u32> debug_count{0};
         if (debug_count.fetch_add(1, std::memory_order_relaxed) < 32) {
           std::cerr << "[stage2-lease-debug] target=" << target.raw_address
@@ -440,7 +440,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
     bool prune_retryable = false;
     auto robust_prune = [&](const vec<RemotePtr>& candidates,
                             size_t existing_count = 0) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         std::cerr << std::string("[reconcile-stage] self=") +
           std::to_string(storage_id_) + " target=" +
           std::to_string(target_raw) + " point=before_lease_snapshot" << std::endl;
@@ -465,7 +465,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
         span<const NodeSnapshot>{snapshots}, skip, prune_config, config.R,
         false, existing_count);
       static std::atomic<u32> debug_prunes{0};
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
           debug_prunes.fetch_add(1, std::memory_order_relaxed) < 16) {
         std::cerr << "[stage2-prune-debug] target=" << target.raw_address
                   << " candidates=" << candidates.size()
@@ -505,7 +505,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
       span<const RemotePtr>{before_provisional},
       span<const std::pair<RemotePtr, u64>>{active}, config.R, robust_prune);
     if (prune_retryable || !plan.valid) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         static std::atomic<u32> debug_count{0};
         if (debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
           std::cerr << "[stage2-lease-failure] reason=plan"
@@ -521,7 +521,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
       continue;
     }
     static std::atomic<u32> debug_plans{0};
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
         debug_plans.fetch_add(1, std::memory_order_relaxed) < 16) {
       size_t adds = 0;
       size_t accepted = 0;
@@ -539,7 +539,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
                 << " active=" << active.size() << std::endl;
     }
 
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       for (const auto& op : target_ops) {
         if (static_cast<ReconcileReverseOpKind>(op.kind) ==
               ReconcileReverseOpKind::remove_provisional_if_present &&
@@ -556,7 +556,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
     }
     const bool changed = before_stable != plan.stable ||
       before_provisional != plan.provisional;
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       std::cerr << std::string("[reconcile-stage] self=") +
         std::to_string(storage_id_) + " target=" +
         std::to_string(target_raw) + " point=before_lease_unlock" << std::endl;
@@ -577,7 +577,7 @@ bool MemoryNode::reconcile_lease_merge_ops(
     }
     if (!storage_owner_certificate_leases_->commit(
           target.raw_address, acquired, released)) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         static std::atomic<u32> debug_count{0};
         if (debug_count.fetch_add(1, std::memory_order_relaxed) < 16) {
           std::cerr << "[stage2-lease-commit-debug] target=" << target.raw_address;

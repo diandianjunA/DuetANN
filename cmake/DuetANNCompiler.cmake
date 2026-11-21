@@ -7,7 +7,7 @@ set(CMAKE_CXX_FLAGS_DEBUG "-g -fno-omit-frame-pointer -fno-inline -fsanitize=add
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11)
     message(FATAL_ERROR
-        "DVSTOR requires GCC 11 or newer for standard C++20 coroutines and atomic_ref. "
+        "DuetANN requires GCC 11 or newer for standard C++20 coroutines and atomic_ref. "
         "Select a newer compiler with -DCMAKE_CXX_COMPILER=/path/to/g++.")
 endif ()
 
@@ -16,13 +16,13 @@ endif ()
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     execute_process(
         COMMAND "${CMAKE_CXX_COMPILER}" -print-file-name=libstdc++.so
-        OUTPUT_VARIABLE DVSTOR_CXX_STDLIB
+        OUTPUT_VARIABLE DUETANN_CXX_STDLIB
         OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE DVSTOR_CXX_STDLIB_RESULT)
-    if (DVSTOR_CXX_STDLIB_RESULT EQUAL 0 AND EXISTS "${DVSTOR_CXX_STDLIB}")
-        get_filename_component(DVSTOR_CXX_STDLIB_DIR
-            "${DVSTOR_CXX_STDLIB}" DIRECTORY)
-        add_link_options("-L${DVSTOR_CXX_STDLIB_DIR}")
+        RESULT_VARIABLE DUETANN_CXX_STDLIB_RESULT)
+    if (DUETANN_CXX_STDLIB_RESULT EQUAL 0 AND EXISTS "${DUETANN_CXX_STDLIB}")
+        get_filename_component(DUETANN_CXX_STDLIB_DIR
+            "${DUETANN_CXX_STDLIB}" DIRECTORY)
+        add_link_options("-L${DUETANN_CXX_STDLIB_DIR}")
     endif ()
 endif ()
 
@@ -30,7 +30,7 @@ endif ()
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--disable-new-dtags")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--disable-new-dtags")
 
-if (NOT DVSTOR_STORAGE_NODE_ONLY)
+if (NOT DUETANN_STORAGE_NODE_ONLY)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 endif ()
@@ -44,7 +44,7 @@ add_compile_options(
     $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
     $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
     $<$<COMPILE_LANGUAGE:CXX>:-Wfatal-errors>)
-if (DVSTOR_USE_NATIVE_ARCH)
+if (DUETANN_USE_NATIVE_ARCH)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-march=native>)
 endif ()
 # Keep finite/NaN checks in routing and update-state code well-defined.

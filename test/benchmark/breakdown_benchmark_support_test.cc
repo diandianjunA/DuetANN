@@ -33,7 +33,7 @@ void test_deterministic_dataset() {
 
 void test_vector_file_reader() {
   const auto path = std::filesystem::temp_directory_path() /
-    "dvstor_breakdown_benchmark_support_test.u8bin";
+    "duetann_breakdown_benchmark_support_test.u8bin";
   {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     const uint32_t rows = 2;
@@ -46,7 +46,7 @@ void test_vector_file_reader() {
 
   const auto rows = tools::breakdown_benchmark::read_vector_rows(path.string(), true);
   const auto ambiguous_path = std::filesystem::temp_directory_path() /
-    "dvstor_breakdown_benchmark_support_test.bin";
+    "duetann_breakdown_benchmark_support_test.bin";
   std::filesystem::copy_file(
     path, ambiguous_path, std::filesystem::copy_options::overwrite_existing);
   bool rejected_ambiguous = false;
@@ -88,7 +88,7 @@ void test_vector_file_reader() {
 
 void test_groundtruth_file_reader_rejects_size_mismatch() {
   const auto path = std::filesystem::temp_directory_path() /
-    "dvstor_breakdown_groundtruth_size_test.bin";
+    "duetann_breakdown_groundtruth_size_test.bin";
   {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     const uint32_t rows = 2;
@@ -491,7 +491,7 @@ void test_maintenance_log_window() {
   };
 
   const auto path = std::filesystem::temp_directory_path() /
-    "dvstor_breakdown_maintenance_test.log";
+    "duetann_breakdown_maintenance_test.log";
   Histogram histogram{};
   histogram.back() = 5;
   {

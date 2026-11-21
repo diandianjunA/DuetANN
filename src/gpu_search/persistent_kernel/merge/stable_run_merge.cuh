@@ -285,7 +285,7 @@ __device__ __noinline__ void stable_sort_candidate_run(
   }
 }
 
-#if DVSTOR_PERSISTENT_WIDE_SORT
+#if DUETANN_PERSISTENT_WIDE_SORT
 // CUB radix variant retained for 256-thread ablation builds.
 template <class BlockSort, u32 ItemsPerThread>
 __device__ __noinline__ void stable_sort_candidate_run_radix(
@@ -338,7 +338,7 @@ __device__ __noinline__ void stable_sort_candidate_run_radix(
     *phase_started = now;
   }
 }
-#endif  // DVSTOR_PERSISTENT_WIDE_SORT
+#endif  // DUETANN_PERSISTENT_WIDE_SORT
 
 __device__ void clear_stable_candidate_run(
   u64* scratch_handles, u8* scratch_flags, f32* scratch_distances,
@@ -933,7 +933,7 @@ __device__ __noinline__ void prepare_approximate_stable_runs(
   __syncthreads();
 
   if (blockDim.x == kApproximateSortThreadsWide) {
-#if DVSTOR_PERSISTENT_WIDE_SORT
+#if DUETANN_PERSISTENT_WIDE_SORT
     stable_sort_candidate_run_radix<ApproximateBlockSortWideRun,
                               kApproximateSortItemsWideRun>(
       workspace.sort.radix_sort_wide_run, candidate_handles,
@@ -963,7 +963,7 @@ __device__ __noinline__ void prepare_approximate_stable_runs(
       state.compact = 0;
       state.prepared = 1;
     }
-#endif  // DVSTOR_PERSISTENT_WIDE_SORT
+#endif  // DUETANN_PERSISTENT_WIDE_SORT
   } else {
     if (threadIdx.x == 0) beam_count = 0;
     __syncthreads();

@@ -8,7 +8,7 @@ bool Stage2Worker::prepare_stage2_reverse(Stage2Context& context) {
     const auto debug_event = [&](u32 event, const StorageOwnerMaintenanceTask& task,
                                  u64 first, u64 second = 0) {
       static const bool enabled =
-        std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr;
+        std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr;
       if (!enabled || event >= 32 || (debug_parent_events_ & (u32{1} << event)) ||
           std::none_of(context.tasks.begin(), context.tasks.end(),
             [](const StorageOwnerMaintenanceTask& candidate) {
@@ -799,7 +799,7 @@ bool Stage2Worker::prepare_stage2_reverse(Stage2Context& context) {
     for (size_t item = 0; item < context.tasks.size(); ++item) {
       StorageOwnerMaintenanceTask& task = context.tasks[item];
       if (task.reverse_reconciled) continue;
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
           task.id < 100000016) {
         std::cerr << "[stage2-bridge-debug] id=" << task.id
                   << " target=" << task.target.raw_address
@@ -932,7 +932,7 @@ bool Stage2Worker::prepare_stage2_reverse(Stage2Context& context) {
                       parent_adjacency.provisional.end(),
                       task.final_target) !=
               parent_adjacency.provisional.end();
-          if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+          if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
               task.id < 100000016) {
             std::cerr << "[stage2-bridge-debug] id=" << task.id
                       << " parent=" << parent.rptr.raw_address
@@ -979,7 +979,7 @@ bool Stage2Worker::prepare_stage2_reverse(Stage2Context& context) {
       // slots, even after promotion; the separately persisted stable
       // certificate carries the idempotent retry anchor.
       task.stage1_backlink_targets = std::move(protected_parents);
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
           task.id < 100000016) {
         std::cerr << "[stage2-bridge-debug] id=" << task.id
                   << " protected=" << protected_parents.size() << std::endl;
@@ -1029,7 +1029,7 @@ bool Stage2Worker::prepare_cleanup_reverse(Stage2Context& context) {
                             const StorageOwnerMaintenanceTask& task) {
       static std::atomic<u32> debug_count{0};
       const auto task_age = std::chrono::steady_clock::now() - task.queued_at;
-      if ((std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr ||
+      if ((std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr ||
            task_age > std::chrono::seconds(60)) &&
           debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
         std::cerr << "[cleanup-prepare-debug] self=" << node_.storage_id_

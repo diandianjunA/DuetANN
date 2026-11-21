@@ -18,19 +18,19 @@ struct RankedShard {
 };
 
 #if defined(__CUDACC__)
-#define DVSTOR_CENTROID_ROUTE_HD __host__ __device__
+#define DUETANN_CENTROID_ROUTE_HD __host__ __device__
 #else
-#define DVSTOR_CENTROID_ROUTE_HD
+#define DUETANN_CENTROID_ROUTE_HD
 #endif
 
-DVSTOR_CENTROID_ROUTE_HD inline constexpr bool less(
+DUETANN_CENTROID_ROUTE_HD inline constexpr bool less(
     const RankedShard& lhs, const RankedShard& rhs) {
   if (lhs.valid != rhs.valid) return lhs.valid > rhs.valid;
   if (lhs.distance != rhs.distance) return lhs.distance < rhs.distance;
   return lhs.shard < rhs.shard;
 }
 
-DVSTOR_CENTROID_ROUTE_HD inline constexpr bool should_exchange(
+DUETANN_CENTROID_ROUTE_HD inline constexpr bool should_exchange(
     const RankedShard& lhs, const RankedShard& rhs, bool ascending) {
   return ascending ? less(rhs, lhs) : less(lhs, rhs);
 }
@@ -38,12 +38,12 @@ DVSTOR_CENTROID_ROUTE_HD inline constexpr bool should_exchange(
 // Ranking is meaningful only when every per-shard snapshot belongs to one
 // complete table publication. An even, unchanged epoch proves that no shard
 // subset was being rewritten while the CTA collected and sorted its inputs.
-DVSTOR_CENTROID_ROUTE_HD inline constexpr bool stable_publication_epoch(
+DUETANN_CENTROID_ROUTE_HD inline constexpr bool stable_publication_epoch(
     u64 before, u64 after) {
   return (before & 1u) == 0 && before == after && (after & 1u) == 0;
 }
 
-#undef DVSTOR_CENTROID_ROUTE_HD
+#undef DUETANN_CENTROID_ROUTE_HD
 
 // CPU-testable mirror of the fixed-size CUDA sorting network.  Production
 // routing executes each compare-exchange stage across the CTA with a barrier;

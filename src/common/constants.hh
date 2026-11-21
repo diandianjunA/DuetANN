@@ -4,8 +4,8 @@
 
 #include <library/types.hh>
 
-#ifndef DVSTOR_GRAPH_EXTENT_QUANTUM_EDGES
-#define DVSTOR_GRAPH_EXTENT_QUANTUM_EDGES 8
+#ifndef DUETANN_GRAPH_EXTENT_QUANTUM_EDGES
+#define DUETANN_GRAPH_EXTENT_QUANTUM_EDGES 8
 #endif
 
 inline constexpr size_t kCacheLineBytes = 64;

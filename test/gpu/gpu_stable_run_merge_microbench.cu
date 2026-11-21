@@ -2,7 +2,7 @@
 
 #include "cuda_test_utils.hh"
 
-using dvstor_test::check_cuda;
+using duetann_test::check_cuda;
 
 #include <cfloat>
 #include <cstdint>
@@ -259,10 +259,10 @@ int main() {
           }
           for (const BeamMergePolicy policy :
                {BeamMergePolicy::legacy, BeamMergePolicy::stable_run}) {
-#if !DVSTOR_PERSISTENT_LEGACY_MERGE
+#if !DUETANN_PERSISTENT_LEGACY_MERGE
     if (policy == BeamMergePolicy::legacy) continue;
 #endif
-#if !DVSTOR_PERSISTENT_WIDE_SORT
+#if !DUETANN_PERSISTENT_WIDE_SORT
             if (threads != kApproximateSortThreadsCompact) continue;
 #endif
             // The register top-k reduction supports beam_capacity <= 128.

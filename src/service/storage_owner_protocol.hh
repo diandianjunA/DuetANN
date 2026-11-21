@@ -31,7 +31,7 @@ inline std::atomic<bool>& mutation_completion_trace_requested() {
 
 inline bool mutation_completion_trace_enabled() {
   return mutation_completion_trace_requested().load(std::memory_order_acquire) ||
-    std::getenv("DVSTOR_TRACE_MUTATION_COMPLETION") != nullptr;
+    std::getenv("DUETANN_TRACE_MUTATION_COMPLETION") != nullptr;
 }
 
 inline void enable_mutation_completion_trace(int) {

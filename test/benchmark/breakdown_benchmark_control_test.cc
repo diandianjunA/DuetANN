@@ -53,7 +53,7 @@ void test_strict_numeric_args(const std::string& config_path) {
 
 void test_strict_service_config() {
   const auto duplicate_path = std::filesystem::temp_directory_path() /
-    "dvstor_breakdown_duplicate_config.ini";
+    "duetann_breakdown_duplicate_config.ini";
   {
     std::ofstream config(duplicate_path, std::ios::trunc);
     config << "[index]\nport = 1234\n[transport]\nport = 1235\n";
@@ -68,7 +68,7 @@ void test_strict_service_config() {
   std::filesystem::remove(duplicate_path);
 
   const auto boolean_path = std::filesystem::temp_directory_path() /
-    "dvstor_breakdown_boolean_config.ini";
+    "duetann_breakdown_boolean_config.ini";
   {
     std::ofstream config(boolean_path, std::ios::trunc);
     config << "initiator = perhaps\n";
@@ -84,7 +84,7 @@ void test_strict_service_config() {
   std::filesystem::remove(boolean_path);
 
   const auto profile_path = std::filesystem::temp_directory_path() /
-    "dvstor_breakdown_native_profile.ini";
+    "duetann_breakdown_native_profile.ini";
   {
     std::ofstream config(profile_path, std::ios::trunc);
     config << "[profile]\nprofile = full\n"
@@ -98,7 +98,7 @@ void test_strict_service_config() {
   }
   const auto args = tools::breakdown_benchmark::build_service_argv(
     profile_path.string());
-  assert(!args.empty() && args.front() == "dvstor_breakdown_benchmark");
+  assert(!args.empty() && args.front() == "duetann_breakdown_benchmark");
   const std::vector<std::pair<std::string, std::string>> expected{
     {"--c1", "off"}, {"--c2", "on"}, {"--c3", "off"}, {"--profile", "full"}};
   for (const auto& [option, value] : expected) {
@@ -134,7 +134,7 @@ void test_strict_service_config() {
   std::filesystem::remove(profile_path);
 
   const auto malformed_path = std::filesystem::temp_directory_path() /
-    "dvstor_breakdown_malformed_section.ini";
+    "duetann_breakdown_malformed_section.ini";
   {
     std::ofstream config(malformed_path, std::ios::trunc);
     config << "[gpu\n";
@@ -401,7 +401,7 @@ void test_query_latency_windows() {
 
 void test_dynamic_delete_args(const std::string& config_path) {
   const auto state_path = std::filesystem::temp_directory_path() /
-    "dvstor_breakdown_dynamic_args.bin";
+    "duetann_breakdown_dynamic_args.bin";
   const auto values = std::vector<std::string>{
     "benchmark", "--service-config", config_path,
     "--workload", "mixed", "--warmup-seconds", "1", "--measure-seconds", "1",
@@ -444,7 +444,7 @@ void test_dynamic_delete_args(const std::string& config_path) {
 
 void test_single_reader_args(const std::string& config_path) {
   const auto state_path = std::filesystem::temp_directory_path() /
-    "dvstor_breakdown_single_reader_args.bin";
+    "duetann_breakdown_single_reader_args.bin";
   const auto values = std::vector<std::string>{
     "benchmark", "--service-config", config_path,
     "--workload", "mixed", "--warmup-seconds", "0", "--measure-seconds", "0",
@@ -490,7 +490,7 @@ void test_single_reader_args(const std::string& config_path) {
 
 void test_dynamic_id_pool() {
   const auto path = std::filesystem::temp_directory_path() /
-    "dvstor_breakdown_dynamic_id_pool_test.bin";
+    "duetann_breakdown_dynamic_id_pool_test.bin";
   std::filesystem::remove(path);
   tools::breakdown_benchmark::DynamicIdPool pool(path);
   assert(!pool.state_file_exists());
@@ -520,7 +520,7 @@ void test_dynamic_id_pool() {
 
 int main() {
   const auto config_path = std::filesystem::temp_directory_path() /
-    "dvstor_breakdown_benchmark_control_test.ini";
+    "duetann_breakdown_benchmark_control_test.ini";
   {
     std::ofstream config(config_path, std::ios::trunc);
     config << "insert-start-id = 100000000\n";

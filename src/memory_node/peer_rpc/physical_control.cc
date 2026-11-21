@@ -80,7 +80,7 @@ bool MemoryNode::activate_local_cleanup_items(
       if (!authority::valid_authority_operation(item.token) ||
           item.authority_shard != authority_shard ||
           !valid_local_storage_node_pointer(target)) {
-        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
           std::cerr << "[cleanup-activate-debug] self=" << storage_id_
                     << " reason=invalid_target id=" << item.id
                     << " generation=" << item.old_generation
@@ -169,7 +169,7 @@ bool MemoryNode::activate_local_cleanup_items(
           snapshot.deleted);
       if (snapshot_disposition == memory_node_peer_rpc_detail::
             CleanupActivationSnapshotDisposition::retry) {
-        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
           std::cerr << "[cleanup-activate-debug] self=" << storage_id_
                     << " reason=snapshot_retry id=" << claim.item.id
                     << " generation=" << claim.item.old_generation
@@ -181,7 +181,7 @@ bool MemoryNode::activate_local_cleanup_items(
       }
       if (snapshot_disposition == memory_node_peer_rpc_detail::
             CleanupActivationSnapshotDisposition::not_found) {
-        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
           std::cerr << "[cleanup-activate-debug] self=" << storage_id_
                     << " reason=not_found id=" << claim.item.id
                     << " expected_generation=" << claim.item.old_generation
@@ -483,7 +483,7 @@ bool MemoryNode::apply_local_authority_placement_items(
       item.expected_placement_version, &resulting_version);
     output.resulting_placement_version = resulting_version;
     if (state == AuthorityRelocateState::busy &&
-        std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       static std::mutex debug_mutex;
       static std::unordered_map<u64, std::chrono::steady_clock::time_point>
         last_logs;
@@ -887,7 +887,7 @@ bool MemoryNode::handle_peer_cleanup_activate_request(
                 << std::endl;
     }
   }
-  if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+  if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
     std::cerr << "[cleanup-wire-reply] self=" << storage_id_
               << " authority=" << source_shard
               << " request_id=" << header.request_id
@@ -1042,7 +1042,7 @@ MemoryNode::TryPeerResponse MemoryNode::wait_peer_control_response(
       header, payload, lease);
     if (state != TryPeerResponse::pending) return state;
     const auto now = std::chrono::steady_clock::now();
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
         now - last_debug >= std::chrono::seconds(5)) {
       last_debug = now;
       std::cerr << "[control-wait-debug] self=" << storage_id_
@@ -1858,12 +1858,12 @@ void MemoryNode::peer_cleanup_control_worker_loop() {
           completion.completed_prefix + 1 == task.source_sequence;
       });
     }
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       std::lock_guard<std::mutex> lock(debug_cleanup_active_requests_mutex_);
       debug_cleanup_active_requests_[std::this_thread::get_id()] = {
         task.header.request_id, std::chrono::steady_clock::now()};
     }
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       std::cerr << "[cleanup-wire-request] self=" << storage_id_
                 << " authority=" << task.source_shard
                 << " request_id=" << task.header.request_id
@@ -1872,7 +1872,7 @@ void MemoryNode::peer_cleanup_control_worker_loop() {
     (void)handle_peer_cleanup_activate_request(
       task.source_shard, task.header,
       items, config);
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       std::lock_guard<std::mutex> lock(debug_cleanup_active_requests_mutex_);
       debug_cleanup_active_requests_.erase(std::this_thread::get_id());
     }

@@ -103,7 +103,7 @@ Context::Context(Configuration& config,
     lib_assert(
       device_attributes_.max_qp_init_rd_atom > 0 &&
         device_attributes_.max_qp_rd_atom > 0,
-      "DVSTOR requires RDMA read/atomic initiator and responder resources");
+      "DuetANN requires RDMA read/atomic initiator and responder resources");
 
     // allocate protection domain
     protection_domain_ = ibv_alloc_pd(context_);
@@ -118,7 +118,7 @@ Context::Context(Configuration& config,
                "Selected RDMA port is not active");
     lib_assert(
       port_attributes_.lid != 0,
-      "DVSTOR requires an InfiniBand LID; RoCE/GRH addressing is not supported");
+      "DuetANN requires an InfiniBand LID; RoCE/GRH addressing is not supported");
     lib_assert(QPInfo::mtu_valid(static_cast<u8>(port_attributes_.active_mtu)),
                "RDMA port reports an invalid active MTU");
     std::cerr << "Selected port state: " << port_attributes_.state

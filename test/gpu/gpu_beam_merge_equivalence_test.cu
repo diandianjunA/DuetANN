@@ -2,7 +2,7 @@
 
 #include "cuda_test_utils.hh"
 
-using dvstor_test::check_cuda;
+using duetann_test::check_cuda;
 
 #include <algorithm>
 #include <cfloat>
@@ -163,7 +163,7 @@ void run_case(
   upload(d_candidate_distances, candidate_distances);
   for (const BeamMergePolicy policy :
        {BeamMergePolicy::legacy, BeamMergePolicy::stable_run}) {
-#if !DVSTOR_PERSISTENT_LEGACY_MERGE
+#if !DUETANN_PERSISTENT_LEGACY_MERGE
     if (policy == BeamMergePolicy::legacy) continue;
 #endif
     if (policy == BeamMergePolicy::legacy &&
@@ -386,13 +386,13 @@ int main() {
     }
     check_cuda(cudaSetDevice(0), "cudaSetDevice");
     run_matrix(128, 128);
-#if DVSTOR_PERSISTENT_WIDE_SORT
+#if DUETANN_PERSISTENT_WIDE_SORT
     run_matrix(256, 128);
 #endif
     // Exercise the Beam=256 register top-k reduction (stable-run policy; the
     // legacy compact-final-256 variant joins in legacy-enabled builds).
     run_matrix(128, 256);
-#if DVSTOR_PERSISTENT_WIDE_SORT
+#if DUETANN_PERSISTENT_WIDE_SORT
     run_matrix(256, 256);
 #endif
     return 0;

@@ -4,11 +4,11 @@
 #include <csignal>
 #include <cstdlib>
 
-extern MemoryNode* dvstor_active_memory_node;
+extern MemoryNode* duetann_active_memory_node;
 
 extern "C" void handle_memory_node_term(int) {
-  if (dvstor_active_memory_node != nullptr) {
-    dvstor_active_memory_node->request_shutdown();
+  if (duetann_active_memory_node != nullptr) {
+    duetann_active_memory_node->request_shutdown();
   }
 }
 

@@ -428,7 +428,7 @@ __device__ __forceinline__ u32 direct_batch_request_length(
 template <bool EnableAsfe>
 __device__ void direct_read_owner_loop(const PersistentKernelParams& params,
                                        u32 queue_count, u32 owner_block) {
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
   constexpr u32 warp_width = 32;
   // The unified kernel launches 128-thread CTAs, so four warps per block is
   // the exact requirement.  Sizing the descriptor matrix for eight warps

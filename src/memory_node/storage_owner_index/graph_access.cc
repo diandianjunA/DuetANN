@@ -81,7 +81,7 @@ IncarnationLockResult MemoryNode::try_lock_node(RemotePtr rptr) {
     }
     if (result != IncarnationLockResult::busy) {
       if (result == IncarnationLockResult::locked &&
-          std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+          std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         std::lock_guard<std::mutex> lock(debug_node_lock_owners_mutex_);
         debug_node_lock_owners_[rptr.raw_address] = std::this_thread::get_id();
         debug_node_lock_owner_tids_[rptr.raw_address] =
@@ -116,7 +116,7 @@ IncarnationLockResult MemoryNode::try_lock_node(RemotePtr rptr) {
     }
     std::this_thread::yield();
   }
-  if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+  if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
     std::lock_guard<std::mutex> lock(debug_node_lock_owners_mutex_);
     if (debug_node_lock_busy_logged_.insert(rptr.raw_address).second) {
       const auto owner = debug_node_lock_owners_.find(rptr.raw_address);

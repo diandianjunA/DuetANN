@@ -15,27 +15,27 @@
 // exist for ablation builds only; leaving them compiled out keeps the CTA's
 // static shared-memory footprint small enough for three resident CTAs per SM
 // on GA102 (100-KiB shared/SM).  Override at configure time with
-// -DDVSTOR_PERSISTENT_WIDE_SORT=ON / -DDVSTOR_PERSISTENT_LEGACY_MERGE=ON.
-#ifndef DVSTOR_PERSISTENT_WIDE_SORT
-#define DVSTOR_PERSISTENT_WIDE_SORT 0
+// -DDUETANN_PERSISTENT_WIDE_SORT=ON / -DDUETANN_PERSISTENT_LEGACY_MERGE=ON.
+#ifndef DUETANN_PERSISTENT_WIDE_SORT
+#define DUETANN_PERSISTENT_WIDE_SORT 0
 #endif
-#ifndef DVSTOR_PERSISTENT_LEGACY_MERGE
-#define DVSTOR_PERSISTENT_LEGACY_MERGE 0
+#ifndef DUETANN_PERSISTENT_LEGACY_MERGE
+#define DUETANN_PERSISTENT_LEGACY_MERGE 0
 #endif
-#ifndef DVSTOR_PERSISTENT_COMPACT_LEGACY_SCRATCH
-#define DVSTOR_PERSISTENT_COMPACT_LEGACY_SCRATCH 0
+#ifndef DUETANN_PERSISTENT_COMPACT_LEGACY_SCRATCH
+#define DUETANN_PERSISTENT_COMPACT_LEGACY_SCRATCH 0
 #endif
-#ifndef DVSTOR_PERSISTENT_MAX_BEAM
-#define DVSTOR_PERSISTENT_MAX_BEAM 256
+#ifndef DUETANN_PERSISTENT_MAX_BEAM
+#define DUETANN_PERSISTENT_MAX_BEAM 256
 #endif
-#ifndef DVSTOR_PERSISTENT_MAX_EXACT
-#define DVSTOR_PERSISTENT_MAX_EXACT 512
+#ifndef DUETANN_PERSISTENT_MAX_EXACT
+#define DUETANN_PERSISTENT_MAX_EXACT 512
 #endif
 
 namespace gpu_search {
 
-inline constexpr u32 kPersistentMaxBeam = DVSTOR_PERSISTENT_MAX_BEAM;
-inline constexpr u32 kPersistentMaxExact = DVSTOR_PERSISTENT_MAX_EXACT;
+inline constexpr u32 kPersistentMaxBeam = DUETANN_PERSISTENT_MAX_BEAM;
+inline constexpr u32 kPersistentMaxExact = DUETANN_PERSISTENT_MAX_EXACT;
 inline constexpr u32 kPersistentMaxSubquantizers = kMaxPersistentSubquantizers;
 // Zero selects the compatibility kernel whose PQ loop remains runtime-sized.
 // The production datasets use one of the compile-time specializations
@@ -76,8 +76,8 @@ inline constexpr u32 kPersistentMaxGraphDegree = 128;
 inline constexpr u32 kPersistentMaxPrefetch = 32;
 inline constexpr u32 kPersistentFrontierRobCapacity = 32;
 inline constexpr u32 kPersistentGraphScratchSlots = kPersistentMaxPrefetch;
-#if DVSTOR_PERSISTENT_COMPACT_LEGACY_SCRATCH
-static_assert(DVSTOR_PERSISTENT_LEGACY_MERGE);
+#if DUETANN_PERSISTENT_COMPACT_LEGACY_SCRATCH
+static_assert(DUETANN_PERSISTENT_LEGACY_MERGE);
 inline constexpr u32 kPersistentStableRunScratch = kPersistentMaxBeam;
 #else
 inline constexpr u32 kPersistentStableRunScratch = 4 * kPersistentMaxBeam;

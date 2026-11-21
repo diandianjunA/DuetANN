@@ -22,7 +22,7 @@ inline constexpr u32 kEndianMarker = 0x01020304;
 inline constexpr std::array<char, 8> kGraphExtentMagic{
   'D', 'V', 'G', 'E', 'X', 'T', '8', '\0'};
 inline constexpr u32 kGraphExtentVersion = 1;
-inline constexpr u32 kGraphExtentQuantum = DVSTOR_GRAPH_EXTENT_QUANTUM_EDGES;
+inline constexpr u32 kGraphExtentQuantum = DUETANN_GRAPH_EXTENT_QUANTUM_EDGES;
 inline constexpr u32 kGraphExtentClassBytes = sizeof(u8);
 inline constexpr u32 kMaxGraphEntryBytes = 2048;
 inline constexpr u32 kCompactPointerBytes = sizeof(u64);

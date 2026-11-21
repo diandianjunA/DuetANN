@@ -2,7 +2,7 @@
 
 #include "cuda_test_utils.hh"
 
-using dvstor_test::check_cuda;
+using duetann_test::check_cuda;
 
 #include <cfloat>
 #include <cstdint>

@@ -1644,7 +1644,7 @@ void MemoryNode::maybe_log_storage_owner_maintenance_observation() {
         stage2_remaining = storage_owner_stage2_tasks_.size();
         cleanup_remaining = storage_owner_cleanup_tasks_.size();
       }
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         std::lock_guard<std::mutex> lock(debug_cleanup_active_requests_mutex_);
         const auto wall_now = std::chrono::steady_clock::now();
         for (const auto& [thread, request] : debug_cleanup_active_requests_) {
@@ -1658,7 +1658,7 @@ void MemoryNode::maybe_log_storage_owner_maintenance_observation() {
           }
         }
       }
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
           storage_owner_certificate_leases_ != nullptr) {
         const auto leases = storage_owner_certificate_leases_->snapshot();
         for (size_t index = 0; index < leases.size() && index < 16; ++index) {

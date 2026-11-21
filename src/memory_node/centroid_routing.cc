@@ -639,11 +639,11 @@ bool MemoryNode::apply_local_centroid_membership_ops(
     }
     if (kind == Kind::add) {
       static std::FILE* graph_audit = [] {
-        const char* path = std::getenv("DVSTOR_GRAPH_AUDIT");
+        const char* path = std::getenv("DUETANN_GRAPH_AUDIT");
         return path == nullptr ? nullptr : std::fopen(path, "a");
       }();
       if (graph_audit != nullptr && pointer.is_dynamic() &&
-          std::getenv("DVSTOR_GRAPH_AUDIT_FINAL_ONLY") == nullptr) {
+          std::getenv("DUETANN_GRAPH_AUDIT_FINAL_ONLY") == nullptr) {
         GraphAdjacency adjacency;
         lib_assert(read_graph_adjacency(pointer, adjacency),
                    "graph audit could not read the final local adjacency");

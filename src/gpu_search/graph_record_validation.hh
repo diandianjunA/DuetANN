@@ -31,26 +31,26 @@ inline constexpr std::uint8_t kGraphExtentClassUnknown =
   vamana::graph_extent::kUnknownLevel;
 
 #if defined(__CUDACC__)
-#define DVSTOR_GRAPH_RECORD_HD __host__ __device__ __forceinline__
+#define DUETANN_GRAPH_RECORD_HD __host__ __device__ __forceinline__
 #else
-#define DVSTOR_GRAPH_RECORD_HD inline
+#define DUETANN_GRAPH_RECORD_HD inline
 #endif
 
-DVSTOR_GRAPH_RECORD_HD bool graph_publication_committed(std::uint32_t version) {
+DUETANN_GRAPH_RECORD_HD bool graph_publication_committed(std::uint32_t version) {
   return (version & 1u) == 0;
 }
 
-DVSTOR_GRAPH_RECORD_HD bool is_full_record_avoidance_hit(
+DUETANN_GRAPH_RECORD_HD bool is_full_record_avoidance_hit(
     bool live_extent, bool partial_read, SnapshotState snapshot) {
   return live_extent && partial_read && snapshot == SnapshotState::valid;
 }
 
-DVSTOR_GRAPH_RECORD_HD std::uint32_t full_record_avoidance_misses(
+DUETANN_GRAPH_RECORD_HD std::uint32_t full_record_avoidance_misses(
     std::uint32_t logical_reads, std::uint32_t hits) {
   return hits < logical_reads ? logical_reads - hits : 0;
 }
 
-DVSTOR_GRAPH_RECORD_HD std::uint16_t checksum16(
+DUETANN_GRAPH_RECORD_HD std::uint16_t checksum16(
     const std::uint8_t* data, std::uint32_t bytes) {
   std::uint32_t hash = 2166136261u;
   for (std::uint32_t index = 0; index < bytes; ++index) {
@@ -65,7 +65,7 @@ DVSTOR_GRAPH_RECORD_HD std::uint16_t checksum16(
 // Return 16777619^exponent modulo 2^32. Unsigned overflow is the arithmetic
 // required by FNV-1a, so exponentiation by squaring can append a long run of
 // zero bytes without reading or materializing them.
-DVSTOR_GRAPH_RECORD_HD std::uint32_t fnv1a_prime_power(
+DUETANN_GRAPH_RECORD_HD std::uint32_t fnv1a_prime_power(
     std::uint32_t exponent) {
   std::uint32_t result = 1u;
   std::uint32_t base = 16777619u;
@@ -88,7 +88,7 @@ DVSTOR_GRAPH_RECORD_HD std::uint32_t fnv1a_prime_power(
 // format. The generic skipped_suffix calculation also keeps the helper exact
 // for prefixes shorter than the graph header, although live-extent callers
 // always transfer at least the complete 16-byte header.
-DVSTOR_GRAPH_RECORD_HD std::uint16_t checksum16_zero_extended_prefix(
+DUETANN_GRAPH_RECORD_HD std::uint16_t checksum16_zero_extended_prefix(
     const std::uint8_t* data,
     std::uint32_t prefix_bytes,
     std::uint32_t total_bytes) {
@@ -107,7 +107,7 @@ DVSTOR_GRAPH_RECORD_HD std::uint16_t checksum16_zero_extended_prefix(
   return static_cast<std::uint16_t>(hash);
 }
 
-DVSTOR_GRAPH_RECORD_HD std::uint32_t load_u32(
+DUETANN_GRAPH_RECORD_HD std::uint32_t load_u32(
     const std::uint8_t* data) {
   return static_cast<std::uint32_t>(data[0]) |
     (static_cast<std::uint32_t>(data[1]) << 8) |
@@ -119,7 +119,7 @@ DVSTOR_GRAPH_RECORD_HD std::uint32_t load_u32(
 // live-extent reader has fetched the complete counted neighbor prefix. The
 // returned byte count is exact (not class-rounded) and must fit inside the
 // transferred prefix before a reconstructed record may be accepted.
-DVSTOR_GRAPH_RECORD_HD bool required_live_extent_bytes(
+DUETANN_GRAPH_RECORD_HD bool required_live_extent_bytes(
     const std::uint8_t* record,
     std::uint32_t available_bytes,
     std::uint32_t graph_degree,
@@ -147,7 +147,7 @@ DVSTOR_GRAPH_RECORD_HD bool required_live_extent_bytes(
   return true;
 }
 
-DVSTOR_GRAPH_RECORD_HD std::uint32_t graph_extent_bytes_for_class(
+DUETANN_GRAPH_RECORD_HD std::uint32_t graph_extent_bytes_for_class(
     std::uint8_t extent_class,
     std::uint32_t record_bytes,
     std::uint32_t graph_entry_capacity) {
@@ -155,7 +155,7 @@ DVSTOR_GRAPH_RECORD_HD std::uint32_t graph_extent_bytes_for_class(
     extent_class, record_bytes, graph_entry_capacity);
 }
 
-DVSTOR_GRAPH_RECORD_HD std::uint8_t graph_extent_class_for_required_bytes(
+DUETANN_GRAPH_RECORD_HD std::uint8_t graph_extent_class_for_required_bytes(
     std::uint32_t required_bytes,
     std::uint32_t graph_entry_capacity) {
   return vamana::graph_extent::level_for_required_bytes(
@@ -164,7 +164,7 @@ DVSTOR_GRAPH_RECORD_HD std::uint8_t graph_extent_class_for_required_bytes(
 
 // Four extent levels share one aligned word so adaptation can use one CAS
 // while preserving the other three nodes.
-DVSTOR_GRAPH_RECORD_HD std::uint8_t packed_graph_extent_class(
+DUETANN_GRAPH_RECORD_HD std::uint8_t packed_graph_extent_class(
     std::uint32_t word, std::uint32_t byte_index) {
   if (byte_index >= sizeof(std::uint32_t)) {
     return kGraphExtentClassUnknown;
@@ -173,7 +173,7 @@ DVSTOR_GRAPH_RECORD_HD std::uint8_t packed_graph_extent_class(
     word >> (byte_index * 8u));
 }
 
-DVSTOR_GRAPH_RECORD_HD vamana::graph_extent::AdaptationResult
+DUETANN_GRAPH_RECORD_HD vamana::graph_extent::AdaptationResult
 adapted_graph_extent_word(
     std::uint32_t observed_word, std::uint32_t byte_index,
     std::uint8_t observed_graph_class, std::uint32_t& adapted_word) {
@@ -193,7 +193,7 @@ adapted_graph_extent_word(
   return transition;
 }
 
-DVSTOR_GRAPH_RECORD_HD bool graph_record_is_zero_initialized_dynamic(
+DUETANN_GRAPH_RECORD_HD bool graph_record_is_zero_initialized_dynamic(
     const std::uint8_t* record) {
   return record[0] == 0 && record[1] == 0 && record[2] == 0 &&
     record[3] == 0 && load_u32(record + 4) == 0 &&
@@ -204,7 +204,7 @@ DVSTOR_GRAPH_RECORD_HD bool graph_record_is_zero_initialized_dynamic(
 // damaged RDMA response: cleanup may have recycled the slot while an older
 // read-committed query still holds its tagged handle.  Static records are never
 // recycled, so an incarnation mismatch for incarnation zero remains invalid.
-DVSTOR_GRAPH_RECORD_HD SnapshotState classify_snapshot(
+DUETANN_GRAPH_RECORD_HD SnapshotState classify_snapshot(
     const std::uint8_t* record,
     std::uint32_t record_bytes,
     std::uint32_t graph_degree,
@@ -245,7 +245,7 @@ DVSTOR_GRAPH_RECORD_HD SnapshotState classify_snapshot(
 // transferred prefix followed by logical zeros. A stale extent hint whose
 // unseen suffix contains published data fails this test and is upgraded to
 // the authoritative full-record path by the caller.
-DVSTOR_GRAPH_RECORD_HD SnapshotState classify_zero_extended_snapshot(
+DUETANN_GRAPH_RECORD_HD SnapshotState classify_zero_extended_snapshot(
     const std::uint8_t* record,
     std::uint32_t transferred_bytes,
     std::uint32_t record_bytes,
@@ -284,7 +284,7 @@ DVSTOR_GRAPH_RECORD_HD SnapshotState classify_zero_extended_snapshot(
     ? SnapshotState::invalid : SnapshotState::stale_incarnation;
 }
 
-DVSTOR_GRAPH_RECORD_HD ReadAction decide_read_action(
+DUETANN_GRAPH_RECORD_HD ReadAction decide_read_action(
     bool transport_succeeded,
     SnapshotState snapshot,
     bool attempts_remain) {
@@ -301,7 +301,7 @@ DVSTOR_GRAPH_RECORD_HD ReadAction decide_read_action(
 // optimistic prefix; Header->Neighbor uses two before falling back after a
 // cross-read checksum conflict. Once an entry has upgraded to full, subtract
 // those partial attempts so it still receives the complete full-read budget.
-DVSTOR_GRAPH_RECORD_HD bool snapshot_retry_available(
+DUETANN_GRAPH_RECORD_HD bool snapshot_retry_available(
     std::uint32_t batch_attempt,
     std::uint32_t optimistic_partial_attempts,
     bool current_read_is_partial,
@@ -318,6 +318,6 @@ DVSTOR_GRAPH_RECORD_HD bool snapshot_retry_available(
   return full_attempts_after_current < maximum_full_attempts;
 }
 
-#undef DVSTOR_GRAPH_RECORD_HD
+#undef DUETANN_GRAPH_RECORD_HD
 
 }  // namespace gpu_search::graph_record_validation

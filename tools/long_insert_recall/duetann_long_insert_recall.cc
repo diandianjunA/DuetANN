@@ -32,7 +32,7 @@
 #include "tools/breakdown_benchmark/args.hh"
 #include "tools/breakdown_benchmark/progress.hh"
 
-#ifdef DVSTOR_LONG_INSERT_WITH_FAISS_CPU
+#ifdef DUETANN_LONG_INSERT_WITH_FAISS_CPU
 #include <faiss/IndexFlat.h>
 #endif
 
@@ -554,7 +554,7 @@ Args parse_args(int argc, char** argv) {
     fail("--groundtruth-precompute-only cannot be combined with "
          "--require-precomputed-groundtruth");
   }
-#ifndef DVSTOR_LONG_INSERT_WITH_FAISS_CPU
+#ifndef DUETANN_LONG_INSERT_WITH_FAISS_CPU
   if (args.dynamic_groundtruth) {
     fail("dynamic groundtruth requires a build with FaissCPU");
   }
@@ -719,7 +719,7 @@ double result_overlap_at_k(const SelfRecallSnapshot& first,
   return total / static_cast<double>(first.result_ids.size());
 }
 
-#ifdef DVSTOR_LONG_INSERT_WITH_FAISS_CPU
+#ifdef DUETANN_LONG_INSERT_WITH_FAISS_CPU
 GroundTruth build_dynamic_groundtruth(
     const VectorRows& queries, const VectorRows& base_rows,
     const VectorRows& insert_rows, size_t insert_row_offset,
@@ -828,7 +828,7 @@ GroundTruth load_dynamic_groundtruth(
     reused = true;
     return read_groundtruth(path);
   }
-#ifdef DVSTOR_LONG_INSERT_WITH_FAISS_CPU
+#ifdef DUETANN_LONG_INSERT_WITH_FAISS_CPU
   reused = false;
   GroundTruth result = build_dynamic_groundtruth(
     queries, base_rows, insert_rows, args.insert_row_offset,

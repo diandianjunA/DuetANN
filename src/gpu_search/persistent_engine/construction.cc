@@ -1,6 +1,6 @@
 #include <filesystem>
 
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
 #include "gpu/gpunetio_probe.hh"
 #endif
 
@@ -13,7 +13,7 @@ namespace gpu_search {
 
 static_assert(kCentroidRouteMaxLiveEntries ==
               format::kStorageCentroidRouteMaxLiveEntries);
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
 static_assert(sizeof(DirectRemoteRegion) ==
               sizeof(gpu::GpuNetioRemoteMemoryRegion));
 static_assert(alignof(DirectRemoteRegion) ==
@@ -154,16 +154,16 @@ void PersistentSearchEngine::Impl::initialize(
     throw std::invalid_argument(
       "GPU navigation beam/exact/degree limit exceeded");
   }
-#if DVSTOR_PERSISTENT_COMPACT_LEGACY_SCRATCH
+#if DUETANN_PERSISTENT_COMPACT_LEGACY_SCRATCH
   if (config.gpu_query_beam_merge_policy != "legacy") {
     throw std::invalid_argument(
       "compact legacy scratch requires the legacy GPU beam merge policy");
   }
-#elif !DVSTOR_PERSISTENT_LEGACY_MERGE
+#elif !DUETANN_PERSISTENT_LEGACY_MERGE
   if (config.gpu_query_beam_merge_policy != "stable-run") {
     throw std::invalid_argument(
       "GPU beam merge policy \"" + config.gpu_query_beam_merge_policy +
-      "\" requires a build with DVSTOR_PERSISTENT_LEGACY_MERGE=ON");
+      "\" requires a build with DUETANN_PERSISTENT_LEGACY_MERGE=ON");
   }
 #endif
 
@@ -608,7 +608,7 @@ void PersistentSearchEngine::Impl::initialize(
     route_sequence_after_offset + index.shards.size() * sizeof(u64);
   const size_t remote_buffer_bytes =
     control_region_offset + control_region_bytes;
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
   // See the bootstrap_data_context declaration: create it before GPUNetIO.
   bootstrap_data_context = std::make_unique<Context>(config);
   direct_transport = std::make_unique<gpu::GpuNetioPersistentTransport>(

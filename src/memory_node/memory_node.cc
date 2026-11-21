@@ -11,7 +11,7 @@
 #include "gpu_search/index_format.hh"
 #include "vamana/storage_layout_resolver.hh"
 
-MemoryNode* dvstor_active_memory_node = nullptr;
+MemoryNode* duetann_active_memory_node = nullptr;
 
 MemoryNode::MemoryNode(Configuration& config)
     : context_(config), cm_(context_, config), num_clients_(config.num_clients),
@@ -24,7 +24,7 @@ MemoryNode::MemoryNode(Configuration& config)
       index_region_(context_),
       peer_rdma_read_outstanding_(num_storage_nodes_),
       mn_memory_bytes_(static_cast<u64>(config.mn_memory_gb) * 1073741824ul) {
-  dvstor_active_memory_node = this;
+  duetann_active_memory_node = this;
   lib_assert(num_storage_nodes_ > 0 &&
                num_storage_nodes_ <= RemotePtr::MEMORY_NODE_MASK + 1,
              "tagged RemotePtr supports between 1 and 64 storage shards");
@@ -240,7 +240,7 @@ MemoryNode::MemoryNode(Configuration& config)
   if (!config.disable_thread_pinning) {
     pin_main_thread(core_assignment_.get_available_core());
   }
-  const char* reuse_connections = std::getenv("DVSTOR_MN_REUSE_CONNECTIONS");
+  const char* reuse_connections = std::getenv("DUETANN_MN_REUSE_CONNECTIONS");
   if (reuse_connections != nullptr && reuse_connections[0] == '1') {
     reconnection_thread_ = std::thread([this] {
       cm_.accept_reconnection(storage_insert_shutdown_);

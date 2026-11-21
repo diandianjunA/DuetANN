@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace dvstor_test {
+namespace duetann_test {
 
 inline void check_cuda(cudaError_t status, const char* operation) {
   if (status != cudaSuccess) {
@@ -14,4 +14,4 @@ inline void check_cuda(cudaError_t status, const char* operation) {
   }
 }
 
-}  // namespace dvstor_test
+}  // namespace duetann_test

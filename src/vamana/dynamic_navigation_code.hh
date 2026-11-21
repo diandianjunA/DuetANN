@@ -17,12 +17,12 @@ inline constexpr std::uint32_t kIncarnationMask = 0x00ffffffu;
 inline constexpr std::uint32_t kChecksumBytes = sizeof(std::uint32_t);
 
 #if defined(__CUDACC__)
-#define DVSTOR_DYNAMIC_NAV_HD __host__ __device__ __forceinline__
+#define DUETANN_DYNAMIC_NAV_HD __host__ __device__ __forceinline__
 #else
-#define DVSTOR_DYNAMIC_NAV_HD inline
+#define DUETANN_DYNAMIC_NAV_HD inline
 #endif
 
-DVSTOR_DYNAMIC_NAV_HD std::uint32_t checksum(
+DUETANN_DYNAMIC_NAV_HD std::uint32_t checksum(
     std::uint32_t packed_tag,
     const std::uint8_t* payload,
     std::uint32_t payload_bytes) {
@@ -42,7 +42,7 @@ DVSTOR_DYNAMIC_NAV_HD std::uint32_t checksum(
   return hash;
 }
 
-DVSTOR_DYNAMIC_NAV_HD std::uint32_t load_u32_le(
+DUETANN_DYNAMIC_NAV_HD std::uint32_t load_u32_le(
     const std::uint8_t* data) {
   return static_cast<std::uint32_t>(data[0]) |
     (static_cast<std::uint32_t>(data[1]) << 8) |
@@ -50,7 +50,7 @@ DVSTOR_DYNAMIC_NAV_HD std::uint32_t load_u32_le(
     (static_cast<std::uint32_t>(data[3]) << 24);
 }
 
-DVSTOR_DYNAMIC_NAV_HD void store_u32_le(
+DUETANN_DYNAMIC_NAV_HD void store_u32_le(
     std::uint8_t* data, std::uint32_t value) {
   data[0] = static_cast<std::uint8_t>(value);
   data[1] = static_cast<std::uint8_t>(value >> 8);
@@ -58,7 +58,7 @@ DVSTOR_DYNAMIC_NAV_HD void store_u32_le(
   data[3] = static_cast<std::uint8_t>(value >> 24);
 }
 
-DVSTOR_DYNAMIC_NAV_HD bool validate(
+DUETANN_DYNAMIC_NAV_HD bool validate(
     std::uint32_t packed_tag,
     const std::uint8_t* payload,
     std::uint32_t payload_bytes,
@@ -68,6 +68,6 @@ DVSTOR_DYNAMIC_NAV_HD bool validate(
       checksum(packed_tag, payload, payload_bytes);
 }
 
-#undef DVSTOR_DYNAMIC_NAV_HD
+#undef DUETANN_DYNAMIC_NAV_HD
 
 }  // namespace vamana::dynamic_navigation_code

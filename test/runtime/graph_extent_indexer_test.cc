@@ -52,7 +52,7 @@ TemporaryDirectory make_temporary_directory() {
       .time_since_epoch().count());
   const filepath_t path =
     std::filesystem::temp_directory_path() /
-    ("dvstor_graph_extent_test_" + std::to_string(nonce));
+    ("duetann_graph_extent_test_" + std::to_string(nonce));
   std::filesystem::create_directories(path);
   return TemporaryDirectory{path};
 }

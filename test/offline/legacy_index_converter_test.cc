@@ -87,7 +87,7 @@ public:
     const auto stamp = std::chrono::steady_clock::now()
                          .time_since_epoch().count();
     path_ = fs::temp_directory_path() /
-      ("dvstor_legacy_converter_test_" + std::to_string(stamp));
+      ("duetann_legacy_converter_test_" + std::to_string(stamp));
     if (!fs::create_directories(path_)) {
       throw std::runtime_error("failed to create converter test directory");
     }

@@ -542,7 +542,7 @@ service::storage_owner::ReconcileReverseResult reconcile_reverse_adjacency(
   const auto add_stable = [&](bool force_prune) {
     const auto debug = [&](size_t before, bool pruned) {
       static std::atomic<u32> count{0};
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
           count.fetch_add(1, std::memory_order_relaxed) < 16) {
         std::cerr << "[direct-prune-debug] target=" << op.target_raw
                   << " before=" << before << " after=" << stable.size()

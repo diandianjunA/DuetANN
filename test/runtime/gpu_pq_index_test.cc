@@ -30,7 +30,7 @@ int main() {
   gpu_search::pq::build_distance_table(model, query, table, scratch);
   assert(std::abs(gpu_search::pq::asymmetric_distance(model, table, code)) < 1e-6f);
 
-  const auto path = std::filesystem::temp_directory_path() / "dvstor-pq16-model.bin";
+  const auto path = std::filesystem::temp_directory_path() / "duetann-pq16-model.bin";
   assert(gpu_search::pq::write_model(path, model, &error));
   gpu_search::pq::Model loaded;
   assert(gpu_search::pq::read_model(path, loaded, &error));

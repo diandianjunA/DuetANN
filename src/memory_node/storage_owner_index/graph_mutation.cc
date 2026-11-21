@@ -439,7 +439,7 @@ vec<RemotePtr> MemoryNode::install_local_provisional_backlinks(
       write_graph_adjacency(target, adjacency.stable,
                             adjacency.provisional,
                             adjacency.generation, false);
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         const node_t candidate_id = *reinterpret_cast<const node_t*>(
           local_node_ptr(candidate) + VamanaNode::offset_id());
         if (candidate_id < 100000016) {

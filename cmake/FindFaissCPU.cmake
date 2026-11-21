@@ -14,14 +14,14 @@ find_package_handle_standard_args(FaissCPU
 if (FaissCPU_FOUND AND NOT TARGET FaissCPU::FaissCPU)
     find_package(Threads REQUIRED)
     set(_FaissCPU_saved_bla_vendor "${BLA_VENDOR}")
-    set(BLA_VENDOR "${DVSTOR_FAISS_BLAS_VENDOR}")
+    set(BLA_VENDOR "${DUETANN_FAISS_BLAS_VENDOR}")
     find_package(BLAS REQUIRED)
     find_package(LAPACK REQUIRED)
     set(BLA_VENDOR "${_FaissCPU_saved_bla_vendor}")
     unset(_FaissCPU_saved_bla_vendor)
     find_package(OpenMP REQUIRED COMPONENTS CXX)
     message(STATUS
-        "FaissCPU BLAS vendor=${DVSTOR_FAISS_BLAS_VENDOR}; libraries=${LAPACK_LIBRARIES};${BLAS_LIBRARIES}")
+        "FaissCPU BLAS vendor=${DUETANN_FAISS_BLAS_VENDOR}; libraries=${LAPACK_LIBRARIES};${BLAS_LIBRARIES}")
 
     add_library(FaissCPU::FaissCPU UNKNOWN IMPORTED)
     set_target_properties(FaissCPU::FaissCPU PROPERTIES

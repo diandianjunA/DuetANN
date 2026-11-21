@@ -11,7 +11,7 @@
 int main(int argc, char** argv) {
   namespace po = boost::program_options;
   tools::vamana_offline::PqIndexOptions options;
-  po::options_description description{"DVSTOR OPQ/PQ indexer"};
+  po::options_description description{"DuetANN OPQ/PQ indexer"};
   description.add_options()
     ("help,h", "Show help")
     ("index-prefix", po::value<filepath_t>(&options.index_prefix)->required(),

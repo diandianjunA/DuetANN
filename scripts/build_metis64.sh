@@ -43,4 +43,4 @@ if ! grep -q '^#define IDXTYPEWIDTH 64' "$INSTALL_DIR/include/metis.h"; then
 fi
 
 echo "METIS64 installed at: $INSTALL_DIR"
-echo "Use CMake with: -DDVSTOR_METIS_ROOT=$INSTALL_DIR -DDVSTOR_METIS_PARTITION=ON"
+echo "Use CMake with: -DDUETANN_METIS_ROOT=$INSTALL_DIR -DDUETANN_METIS_PARTITION=ON"

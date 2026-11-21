@@ -437,7 +437,7 @@ public:
     Slot& slot = slots_[slot_index];
     if (slot.state == State::consuming) return std::nullopt;
 
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
         (slot.expected_type == service::storage_owner::PeerRpcType::
           reverse_update_response ||
          slot.expected_type == service::storage_owner::PeerRpcType::

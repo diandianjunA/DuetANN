@@ -139,7 +139,7 @@ MemoryNode::prepare_local_stage1_item(
   // and locally coordinated tokens are measured uniformly.
   const auto physical_stage1_started = std::chrono::steady_clock::now();
   const auto debug_stage1 = [&](const char* phase) {
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       std::cerr << "[stage1-execute-debug] self=" << storage_id_
                 << " id=" << item.id
                 << " operation_id=" << item.client_batch_id
@@ -882,7 +882,7 @@ bool MemoryNode::arm_local_stage1_items(
     // generation, target, and placement-version conflicts remain failed.
     if (!whole_batch_claimed) {
       restore_claims();
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
           transient_unready && !items.empty()) {
         const auto& item = items[0];
         const Stage1OperationKey key{

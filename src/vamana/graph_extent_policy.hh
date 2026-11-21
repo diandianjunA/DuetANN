@@ -8,13 +8,13 @@ namespace vamana::graph_extent {
 
 inline constexpr std::uint32_t kHeaderBytes = 16;
 inline constexpr std::uint32_t kPointerBytes = 8;
-inline constexpr std::uint32_t kQuantumEdges = DVSTOR_GRAPH_EXTENT_QUANTUM_EDGES;
+inline constexpr std::uint32_t kQuantumEdges = DUETANN_GRAPH_EXTENT_QUANTUM_EDGES;
 inline constexpr std::uint8_t kUnknownLevel = 0xffu;
 
 #if defined(__CUDACC__)
-#define DVSTOR_GRAPH_EXTENT_HD __host__ __device__ __forceinline__
+#define DUETANN_GRAPH_EXTENT_HD __host__ __device__ __forceinline__
 #else
-#define DVSTOR_GRAPH_EXTENT_HD constexpr
+#define DUETANN_GRAPH_EXTENT_HD constexpr
 #endif
 
 enum class Adaptation : std::uint8_t {
@@ -29,7 +29,7 @@ struct AdaptationResult {
   Adaptation adaptation{Adaptation::none};
 };
 
-DVSTOR_GRAPH_EXTENT_HD std::uint8_t level_for_neighbors(
+DUETANN_GRAPH_EXTENT_HD std::uint8_t level_for_neighbors(
     std::uint32_t live_neighbors, std::uint32_t graph_entry_capacity) {
   if (live_neighbors > graph_entry_capacity) return kUnknownLevel;
   const std::uint32_t level = live_neighbors / kQuantumEdges +
@@ -38,7 +38,7 @@ DVSTOR_GRAPH_EXTENT_HD std::uint8_t level_for_neighbors(
                                : kUnknownLevel;
 }
 
-DVSTOR_GRAPH_EXTENT_HD std::uint32_t bytes_for_level(
+DUETANN_GRAPH_EXTENT_HD std::uint32_t bytes_for_level(
     std::uint8_t level, std::uint32_t record_bytes,
     std::uint32_t graph_entry_capacity) {
   if (record_bytes < kHeaderBytes || level == kUnknownLevel) {
@@ -56,7 +56,7 @@ DVSTOR_GRAPH_EXTENT_HD std::uint32_t bytes_for_level(
   return extent_bytes < record_bytes ? extent_bytes : record_bytes;
 }
 
-DVSTOR_GRAPH_EXTENT_HD std::uint8_t level_for_required_bytes(
+DUETANN_GRAPH_EXTENT_HD std::uint8_t level_for_required_bytes(
     std::uint32_t required_bytes, std::uint32_t graph_entry_capacity) {
   if (required_bytes < kHeaderBytes) return kUnknownLevel;
   const std::uint32_t payload_bytes = required_bytes - kHeaderBytes;
@@ -65,7 +65,7 @@ DVSTOR_GRAPH_EXTENT_HD std::uint8_t level_for_required_bytes(
                              graph_entry_capacity);
 }
 
-DVSTOR_GRAPH_EXTENT_HD AdaptationResult adapt_level(
+DUETANN_GRAPH_EXTENT_HD AdaptationResult adapt_level(
     std::uint8_t cached_level, std::uint8_t observed_level) {
   if (observed_level == kUnknownLevel) return {cached_level, Adaptation::none};
   if (cached_level == kUnknownLevel) {
@@ -81,6 +81,6 @@ DVSTOR_GRAPH_EXTENT_HD AdaptationResult adapt_level(
   return {cached_level, Adaptation::none};
 }
 
-#undef DVSTOR_GRAPH_EXTENT_HD
+#undef DUETANN_GRAPH_EXTENT_HD
 
 }  // namespace vamana::graph_extent

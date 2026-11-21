@@ -41,12 +41,12 @@ struct RemoteCheckpoint {
 };
 
 std::optional<RemoteCheckpoint> remote_checkpoint() {
-  const char* target = std::getenv("DVSTOR_CHECKPOINT_SSH_TARGET");
+  const char* target = std::getenv("DUETANN_CHECKPOINT_SSH_TARGET");
   if (target == nullptr || target[0] == 0) return std::nullopt;
   const str value{target};
   const size_t colon = value.find(':');
   lib_assert(colon != str::npos && colon != 0 && colon + 1 < value.size(),
-             "DVSTOR_CHECKPOINT_SSH_TARGET must be host:/absolute/directory");
+             "DUETANN_CHECKPOINT_SSH_TARGET must be host:/absolute/directory");
   return RemoteCheckpoint{value.substr(0, colon), value.substr(colon + 1)};
 }
 

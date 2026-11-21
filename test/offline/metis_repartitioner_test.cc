@@ -45,7 +45,7 @@ constexpr u32 kSubquantizers = 4;
 
 struct TemporaryDirectory {
   fs::path path = fs::temp_directory_path() /
-                  ("dvstor-metis-repartition-" + std::to_string(::getpid()));
+                  ("duetann-metis-repartition-" + std::to_string(::getpid()));
   TemporaryDirectory() {
     std::error_code ignored;
     fs::remove_all(path, ignored);

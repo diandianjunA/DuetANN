@@ -101,7 +101,7 @@ def main():
     assert c3["profile"]["c3"] == "off"
     assert c3["gpu"]["gpu-max-expansions"] == "384"
 
-    with tempfile.TemporaryDirectory(prefix="dvstor-config-contract-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="duetann-config-contract-") as temporary:
         temporary = Path(temporary)
         expanded_path = temporary / "full.conf"
         write_config(full, expanded_path)

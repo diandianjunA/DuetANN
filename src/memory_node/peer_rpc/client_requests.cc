@@ -50,7 +50,7 @@ bool MemoryNode::try_post_peer_rpc_request_attempt(
     : peer_async_responses_->register_send_attempt(
         request_id, target_shard, response_type, item_count,
         maintenance_wake_owner);
-  if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+  if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
       (request_type == service::storage_owner::PeerRpcType::
         reverse_update_request ||
        request_type == service::storage_owner::PeerRpcType::
@@ -72,7 +72,7 @@ bool MemoryNode::try_post_peer_rpc_request_attempt(
   if (registration !=
         memory_node_detail::PeerResponseRegistration::registered &&
       registration != memory_node_detail::PeerResponseRegistration::retry) {
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
         (request_type == service::storage_owner::PeerRpcType::
           reverse_update_request ||
          request_type == service::storage_owner::PeerRpcType::
@@ -96,7 +96,7 @@ bool MemoryNode::try_post_peer_rpc_request_attempt(
 
   u32 slot_id = 0;
   if (!try_acquire_peer_rpc_send_slot(target_shard, send_class, slot_id)) {
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
         (request_type == service::storage_owner::PeerRpcType::
           reverse_update_request ||
          request_type == service::storage_owner::PeerRpcType::
@@ -381,7 +381,7 @@ bool MemoryNode::post_peer_op_batch_async(
     const Configuration& config) {
   item_count = 0;
   const auto rejected = [&](const char* reason) {
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       static std::atomic<u32> debug_count{0};
       if (debug_count.fetch_add(1, std::memory_order_relaxed) < 128) {
         std::cerr << std::string("[reverse-validate-debug] self=") +
@@ -590,7 +590,7 @@ bool MemoryNode::send_reconcile_reverse_fanout_and_wait(
          !peer_reverse_shutdown_.load(std::memory_order_acquire)) {
     bool made_progress = false;
     const auto debug_now = std::chrono::steady_clock::now();
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
         debug_now - last_debug >= std::chrono::seconds(5)) {
       last_debug = debug_now;
       for (const PendingResponse& response : pending) {
@@ -1213,7 +1213,7 @@ bool MemoryNode::execute_remote_stage1_fanout_and_wait(
            !storage_insert_shutdown_.load(std::memory_order_acquire)) {
       bool made_progress = false;
       const auto now = std::chrono::steady_clock::now();
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
           now - last_debug >= std::chrono::seconds(5)) {
         last_debug = now;
         for (const PendingStage1& request : pending) {
@@ -1684,7 +1684,7 @@ bool MemoryNode::control_stage1_fanout_and_wait(
         "malformed token-fenced Stage1 control response");
     }
     if (disposition == Stage1ControlResponseDisposition::retry) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         static std::mutex debug_mutex;
         static std::unordered_map<u64, std::chrono::steady_clock::time_point>
           last_logs;

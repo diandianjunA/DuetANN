@@ -28,7 +28,7 @@ struct TemporaryFile {
 void test_explicit_dtype_for_ambiguous_bin() {
   TemporaryFile input{
     std::filesystem::temp_directory_path() /
-    ("dvstor_explicit_dtype_" + std::to_string(::getpid()) + ".bin")};
+    ("duetann_explicit_dtype_" + std::to_string(::getpid()) + ".bin")};
   {
     std::ofstream output(input.path, std::ios::binary | std::ios::trunc);
     const uint32_t rows = 2;
@@ -52,7 +52,7 @@ void test_explicit_dtype_for_ambiguous_bin() {
 void test_full_reverse_edge_prunes() {
   TemporaryFile input{
     std::filesystem::temp_directory_path() /
-    ("dvstor_reverse_prune_" + std::to_string(::getpid()) + ".fbin")};
+    ("duetann_reverse_prune_" + std::to_string(::getpid()) + ".fbin")};
   {
     std::ofstream output(input.path, std::ios::binary | std::ios::trunc);
     const uint32_t rows = 4;
@@ -90,7 +90,7 @@ void test_full_reverse_edge_prunes() {
 
   const std::filesystem::path checkpoint =
       std::filesystem::temp_directory_path() /
-      ("dvstor_checkpoint_" + std::to_string(::getpid()));
+      ("duetann_checkpoint_" + std::to_string(::getpid()));
   GraphCheckpointMeta meta;
   meta.num_nodes = 4;
   meta.dim = 1;
@@ -158,7 +158,7 @@ vec<u32> reference_occlusion_prune(
 void test_reference_prune_differential() {
   TemporaryFile input{
       std::filesystem::temp_directory_path() /
-      ("dvstor_prune_differential_" + std::to_string(::getpid()) + ".fbin")};
+      ("duetann_prune_differential_" + std::to_string(::getpid()) + ".fbin")};
   constexpr uint32_t rows = 32;
   constexpr uint32_t dim = 2;
   {
@@ -226,7 +226,7 @@ int main() {
   constexpr uint32_t kDim = 1;
   TemporaryFile input{
       std::filesystem::temp_directory_path() /
-      ("dvstor_offline_chain_" + std::to_string(::getpid()) + ".fbin")};
+      ("duetann_offline_chain_" + std::to_string(::getpid()) + ".fbin")};
 
   {
     std::ofstream output(input.path, std::ios::binary | std::ios::trunc);

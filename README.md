@@ -1,6 +1,6 @@
-# DVSTOR
+# DuetANN
 
-DVSTOR 是面向动态向量检索的存算分离系统。存储节点维护 Vamana 图、精确向量和更新状态，
+DuetANN 是面向动态向量检索的存算分离系统。存储节点维护 Vamana 图、精确向量和更新状态，
 计算节点通过 RDMA 访问索引，使用 OPQ/PQ 导航和原始向量 L2 精排。
 
 项目包含两种查询引擎，共用 schema-16 索引：
@@ -45,24 +45,24 @@ V100 兼容构建不降低 GPUNetIO 的硬件要求：DOCA 版本、ConnectX 网
 
 ```bash
 cmake -S . -B build-storage -DCMAKE_BUILD_TYPE=Release \
-  -DDVSTOR_STORAGE_NODE_ONLY=ON
+  -DDUETANN_STORAGE_NODE_ONLY=ON
 cmake --build build-storage -j16
 ```
 
-仅运行存储服务时，可再设置 `-DDVSTOR_BUILD_OFFLINE_TOOLS=OFF`，无需安装 Faiss、CUDA 或 DOCA。
+仅运行存储服务时，可再设置 `-DDUETANN_BUILD_OFFLINE_TOOLS=OFF`，无需安装 Faiss、CUDA 或 DOCA。
 若 Conda 的 TBB 引入了另一套 Boost 头文件，在配置命令中同时指定
 `-DBOOST_ROOT="$CONDA_PREFIX" -DBoost_NO_SYSTEM_PATHS=ON`，保证 Boost 头文件与链接库来自同一安装。
 计算和存储构建使用各自的目录；实验脚本通过 `BUILD_DIR`、`STORAGE_BUILD_DIR` 选择对应产物。
 
-`DVSTOR_METIS_PARTITION=AUTO` 会检查 METIS/GKlib 的实际链接兼容性，并尝试回退到系统库。
-需要 METIS 时设置 `-DDVSTOR_METIS_PARTITION=ON`；自定义安装路径使用
-`-DDVSTOR_METIS_ROOT=/path/to/metis`。没有兼容 METIS 时仍可使用 `balanced` 或 `bfs` 分片。
+`DUETANN_METIS_PARTITION=AUTO` 会检查 METIS/GKlib 的实际链接兼容性，并尝试回退到系统库。
+需要 METIS 时设置 `-DDUETANN_METIS_PARTITION=ON`；自定义安装路径使用
+`-DDUETANN_METIS_ROOT=/path/to/metis`。没有兼容 METIS 时仍可使用 `balanced` 或 `bfs` 分片。
 
 | 可执行文件 | 用途 |
 |---|---|
-| `dvstor_compute_node` | 计算服务与更新客户端 |
-| `dvstor_memory_node` | 存储服务 |
-| `dvstor_breakdown_benchmark` | 查询/更新负载、吞吐、延迟、召回率与分解统计 |
+| `duetann_compute_node` | 计算服务与更新客户端 |
+| `duetann_memory_node` | 存储服务 |
+| `duetann_breakdown_benchmark` | 查询/更新负载、吞吐、延迟、召回率与分解统计 |
 | `vamana_offline_builder` | CPU 构图和物理分片 |
 | `vamana_pq_indexer` | OPQ/PQ 训练、编码和 schema-16 产物生成 |
 | `vamana_graph_extent_indexer` | 校验图分片并生成读取长度 sidecar |

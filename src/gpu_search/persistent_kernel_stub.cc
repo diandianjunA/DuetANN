@@ -1,5 +1,5 @@
 // Linker stubs for the persistent-kernel entry points when the runtime is
-// built without DOCA GPUNetIO (DVSTOR_HAVE_GPUNETIO off). The persistent
+// built without DOCA GPUNetIO (DUETANN_HAVE_GPUNETIO off). The persistent
 // engine constructor rejects that configuration before any of these can run,
 // so each stub simply throws if it is ever reached.
 #include "gpu_search/persistent_kernel.hh"

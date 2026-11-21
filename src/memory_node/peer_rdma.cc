@@ -706,7 +706,7 @@ void MemoryNode::wait_peer_sync_completion(u64 wr_id) {
     }
   }
   while (!consume_peer_sync_completion(wr_id)) {
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
         std::chrono::steady_clock::now() - debug_started >=
           std::chrono::seconds(5)) {
       static std::atomic<u32> debug_count{0};

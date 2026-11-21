@@ -33,7 +33,7 @@
 #include "gpu_search/centroid_route_poll_policy.hh"
 #include "gpu_search/navigation_bootstrapper.hh"
 #include "gpu_search/persistent_engine.hh"
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
 #include "gpu/gpunetio_transport.hh"
 #endif
 #include "gpu_search/index_format.hh"
@@ -154,7 +154,7 @@ struct PersistentSearchEngine::Impl {
   std::shared_ptr<const centroid_home::Snapshot> centroid_home_snapshot;
   std::vector<format::StorageCentroidRouteDescriptor>
     storage_centroid_route_descriptors;
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
   std::unique_ptr<gpu::GpuNetioPersistentTransport> direct_transport;
   gpu::GpuNetioPersistentView direct_view{};
 #else

@@ -6,7 +6,7 @@
 #include <limits>
 #include <stdexcept>
 
-#if !defined(IBV_WC_DRIVER1) && !defined(DVSTOR_HAVE_IBV_WC_DRIVER1)
+#if !defined(IBV_WC_DRIVER1) && !defined(DUETANN_HAVE_IBV_WC_DRIVER1)
 #define IBV_WC_DRIVER1 135
 #define IBV_WC_DRIVER2 136
 #define IBV_WC_DRIVER3 137

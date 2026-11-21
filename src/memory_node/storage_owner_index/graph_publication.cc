@@ -207,7 +207,7 @@ void MemoryNode::write_graph_adjacency(
 }
 
 void MemoryNode::dump_final_graph_for_audit() {
-  const char* path = std::getenv("DVSTOR_GRAPH_AUDIT");
+  const char* path = std::getenv("DUETANN_GRAPH_AUDIT");
   if (path == nullptr) return;
   std::FILE* output = std::fopen(path, "a");
   lib_assert(output != nullptr, "cannot open final graph audit output");
@@ -549,7 +549,7 @@ void MemoryNode::lock_node(RemotePtr rptr) {
 }
 
 void MemoryNode::unlock_node(RemotePtr rptr) {
-  if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+  if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
     std::lock_guard<std::mutex> lock(debug_node_lock_owners_mutex_);
     debug_node_lock_owners_.erase(rptr.raw_address);
   }

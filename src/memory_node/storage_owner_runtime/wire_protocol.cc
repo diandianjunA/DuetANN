@@ -957,7 +957,7 @@ bool MemoryNode::execute_storage_owner_batch_items(const node_t* ids,
           }
           if (disposition == memory_node_peer_rpc_detail::
                 Stage1ControlResponseDisposition::retry) {
-            if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+            if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
               static std::mutex debug_mutex;
               static std::unordered_map<
                 u64, std::chrono::steady_clock::time_point> last_logs;

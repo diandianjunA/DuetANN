@@ -23,11 +23,11 @@ union CandidateSortWorkspace {
   // stable_sort_candidate_run: one sorted 128-entry warp run per merge step,
   // or a full 256-entry run pair when beam_capacity > 128.
   u64 stable_run_exchange[2 * kApproximateSortThreadsCompact];
-#if DVSTOR_PERSISTENT_WIDE_SORT
+#if DUETANN_PERSISTENT_WIDE_SORT
   ApproximateBlockSortWide::TempStorage radix_sort_wide;
   ApproximateBlockSortWideRun::TempStorage radix_sort_wide_run;
 #endif
-#if DVSTOR_PERSISTENT_LEGACY_MERGE
+#if DUETANN_PERSISTENT_LEGACY_MERGE
   ApproximateBlockSortCompactPass::TempStorage radix_sort_compact_pass;
   ApproximateBlockSortCompactFinal::TempStorage radix_sort_compact_final;
   ApproximateBlockSortCompactFinal256::TempStorage radix_sort_compact_final_256;
@@ -124,7 +124,7 @@ __device__ __forceinline__ f32 query_component(const u8* query, u8 dtype,
   }
 }
 
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
 __device__ i32 poll_direct_cq(doca_gpu_dev_verbs_cq* completion_queue,
                               doca_gpu_dev_verbs_ticket_t ticket,
                               u64 timeout_ns, const u32* stop,
@@ -646,7 +646,7 @@ __device__ void sort_candidates(u64* handles, u32* ids, f32* distances,
   }
 }
 
-#if DVSTOR_PERSISTENT_WIDE_SORT
+#if DUETANN_PERSISTENT_WIDE_SORT
 template <class BlockSort, u32 ItemsPerThread>
 __device__ void merge_approximate_radix(
   u64* candidate_handles, f32* candidate_distances, u32 candidate_count,
@@ -712,9 +712,9 @@ __device__ void merge_approximate_radix(
   __syncthreads();
 }
 
-#endif  // DVSTOR_PERSISTENT_WIDE_SORT
+#endif  // DUETANN_PERSISTENT_WIDE_SORT
 
-#if DVSTOR_PERSISTENT_LEGACY_MERGE
+#if DUETANN_PERSISTENT_LEGACY_MERGE
 template <u32 ItemsPerThread, class BlockSort>
 __device__ void merge_approximate_compact_final(
   u64* beam_handles, u32* beam_ids, f32* beam_distances, u8* beam_expanded,
@@ -842,6 +842,6 @@ __device__ void merge_approximate_compact(
       workspace.sort.radix_sort_compact_final_256);
   }
 }
-#endif  // DVSTOR_PERSISTENT_LEGACY_MERGE
+#endif  // DUETANN_PERSISTENT_LEGACY_MERGE
 
 }  // namespace gpu_search::persistent_kernel_detail

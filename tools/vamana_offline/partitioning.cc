@@ -13,11 +13,11 @@
 #include "tools/vamana_offline/dataset_io.hh"
 #include "tools/vamana_offline/progress.hh"
 
-#ifndef DVSTOR_HAVE_METIS
-#define DVSTOR_HAVE_METIS 0
+#ifndef DUETANN_HAVE_METIS
+#define DUETANN_HAVE_METIS 0
 #endif
 
-#if DVSTOR_HAVE_METIS
+#if DUETANN_HAVE_METIS
 #define idx_t metis_idx_t
 #define real_t metis_real_t
 #include <metis.h>
@@ -29,7 +29,7 @@ namespace tools::vamana_offline {
 namespace {
 
 size_t align_checked_idx(size_t value, const char* name) {
-#if DVSTOR_HAVE_METIS
+#if DUETANN_HAVE_METIS
   if (value > static_cast<size_t>(std::numeric_limits<metis_idx_t>::max())) {
     throw std::runtime_error(str{name} + " exceeds METIS idx_t capacity; rebuild METIS with 64-bit idx_t");
   }
@@ -39,7 +39,7 @@ size_t align_checked_idx(size_t value, const char* name) {
   return value;
 }
 
-#if DVSTOR_HAVE_METIS
+#if DUETANN_HAVE_METIS
 u32 edge_u(u64 packed) {
   return static_cast<u32>(packed >> 32);
 }
@@ -75,11 +75,11 @@ void fill_stats(size_t num_nodes, const vec<u32>& parts, const vec<u64>& edges, 
 }  // namespace
 
 bool metis_partitioning_available() {
-  return DVSTOR_HAVE_METIS != 0;
+  return DUETANN_HAVE_METIS != 0;
 }
 
 u32 metis_index_bits() {
-#if DVSTOR_HAVE_METIS
+#if DUETANN_HAVE_METIS
   return static_cast<u32>(sizeof(metis_idx_t) * 8);
 #else
   return 0;
@@ -87,10 +87,10 @@ u32 metis_index_bits() {
 }
 
 str metis_unavailable_reason() {
-#if DVSTOR_HAVE_METIS
+#if DUETANN_HAVE_METIS
   return {};
 #else
-  return "METIS support is not built. Install libmetis-dev and configure with -DDVSTOR_METIS_PARTITION=ON.";
+  return "METIS support is not built. Install libmetis-dev and configure with -DDUETANN_METIS_PARTITION=ON.";
 #endif
 }
 
@@ -163,7 +163,7 @@ vec<u32> compute_metis_partition(size_t num_nodes,
   align_checked_idx(num_nodes, "node count");
   align_checked_idx(edges.size() * 2, "adjacency entry count");
 
-#if DVSTOR_HAVE_METIS
+#if DUETANN_HAVE_METIS
   vec<metis_idx_t> xadj(num_nodes + 1, 0);
   for (u64 edge : edges) {
     const u32 u = edge_u(edge);

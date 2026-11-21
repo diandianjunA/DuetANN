@@ -231,7 +231,7 @@ std::vector<char*> make_argv(std::vector<std::string>& args) {
 std::vector<std::string> build_service_argv(const std::string& service_config_path) {
   const auto config = read_config(service_config_path);
   std::vector<std::string> args;
-  args.emplace_back("dvstor_breakdown_benchmark");
+  args.emplace_back("duetann_breakdown_benchmark");
 
   static const std::vector<std::string> multi_keys = {"servers", "clients", "storage-peers"};
   static const std::vector<std::string> flag_keys = {

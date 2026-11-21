@@ -58,7 +58,7 @@ void assert_failed(int status) {
 int main() {
   const TemporaryDirectory temporary{
     std::filesystem::temp_directory_path() /
-      ("dvstor_graph_publish_" + std::to_string(::getpid()))};
+      ("duetann_graph_publish_" + std::to_string(::getpid()))};
   std::filesystem::create_directories(temporary.path);
   const auto dataset_path = temporary.path / "base.fbin";
   {

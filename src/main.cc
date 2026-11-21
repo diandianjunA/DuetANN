@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
   configuration::IndexConfiguration config{argc, argv};
 
   if (config.is_server) {
-    std::cerr << "use dvstor_memory_node for a storage process\n";
+    std::cerr << "use duetann_memory_node for a storage process\n";
     return EXIT_FAILURE;
   }
   ComputeService service{config};

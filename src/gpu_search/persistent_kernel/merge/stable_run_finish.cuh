@@ -136,7 +136,7 @@ __device__ void merge_approximate_into_beam(
     return;
   }
   if (blockDim.x == kApproximateSortThreadsWide) {
-#if DVSTOR_PERSISTENT_WIDE_SORT
+#if DUETANN_PERSISTENT_WIDE_SORT
     merge_approximate_radix<ApproximateBlockSortWide,
                             kApproximateSortItemsWide>(
       candidate_handles, candidate_distances, candidate_count, beam_handles,
@@ -148,7 +148,7 @@ __device__ void merge_approximate_into_beam(
     __trap();
 #endif
   } else {
-#if DVSTOR_PERSISTENT_LEGACY_MERGE
+#if DUETANN_PERSISTENT_LEGACY_MERGE
     merge_approximate_compact(
       candidate_handles, candidate_distances, beam_handles, beam_ids,
       beam_distances, beam_expanded, beam_count, beam_capacity, existing_count,

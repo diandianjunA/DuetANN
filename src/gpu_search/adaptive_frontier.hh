@@ -43,25 +43,25 @@ struct ControllerState {
 };
 
 #if defined(__CUDACC__)
-#define DVSTOR_ADAPTIVE_FRONTIER_HD __host__ __device__ __forceinline__
+#define DUETANN_ADAPTIVE_FRONTIER_HD __host__ __device__ __forceinline__
 #else
-#define DVSTOR_ADAPTIVE_FRONTIER_HD inline
+#define DUETANN_ADAPTIVE_FRONTIER_HD inline
 #endif
 
-DVSTOR_ADAPTIVE_FRONTIER_HD constexpr u32 clamp_width(
+DUETANN_ADAPTIVE_FRONTIER_HD constexpr u32 clamp_width(
     u32 value, u32 lower, u32 upper) {
   return value < lower ? lower : (value > upper ? upper : value);
 }
 
 // Configuration value used when --gpu-graph-issue-width is left at zero.
 // This is a hardware/workspace bound, not a dataset-specific tuning value.
-DVSTOR_ADAPTIVE_FRONTIER_HD constexpr u32 automatic_max_issue_width(
+DUETANN_ADAPTIVE_FRONTIER_HD constexpr u32 automatic_max_issue_width(
     u32 traversal_beam_width) {
   return traversal_beam_width < kFrontierCapacity
     ? traversal_beam_width : kFrontierCapacity;
 }
 
-DVSTOR_ADAPTIVE_FRONTIER_HD constexpr ControllerState normalize(
+DUETANN_ADAPTIVE_FRONTIER_HD constexpr ControllerState normalize(
     ControllerState state) {
   state.commit_width =
     clamp_width(state.commit_width, 1u, kFrontierCapacity);
@@ -79,7 +79,7 @@ DVSTOR_ADAPTIVE_FRONTIER_HD constexpr ControllerState normalize(
 // from the runtime Commit width: a wider mandatory frontier already supplies
 // more RDMA demand and therefore needs proportionally fewer shadow probes per
 // query.  No dataset or machine-specific interval is introduced.
-DVSTOR_ADAPTIVE_FRONTIER_HD constexpr u32 collapsed_reprobe_period(
+DUETANN_ADAPTIVE_FRONTIER_HD constexpr u32 collapsed_reprobe_period(
     u32 commit_width) {
   return clamp_width(commit_width, 1u, kFrontierCapacity);
 }
@@ -89,7 +89,7 @@ DVSTOR_ADAPTIVE_FRONTIER_HD constexpr u32 collapsed_reprobe_period(
 // that first slot, growth/shrink decisions use only observed tail utility;
 // an unprofitable frontier therefore falls back to commit width and is
 // reopened only by the low-frequency query-boundary probe below.
-DVSTOR_ADAPTIVE_FRONTIER_HD constexpr u32 initial_issue_width(
+DUETANN_ADAPTIVE_FRONTIER_HD constexpr u32 initial_issue_width(
     u32 commit_width, u32 max_issue_width) {
   ControllerState bounds = normalize(
     ControllerState{commit_width, max_issue_width, commit_width});
@@ -97,7 +97,7 @@ DVSTOR_ADAPTIVE_FRONTIER_HD constexpr u32 initial_issue_width(
     ? bounds.commit_width + 1u : bounds.commit_width;
 }
 
-DVSTOR_ADAPTIVE_FRONTIER_HD constexpr ControllerState make_controller_state(
+DUETANN_ADAPTIVE_FRONTIER_HD constexpr ControllerState make_controller_state(
     u32 commit_width, u32 max_issue_width) {
   ControllerState state = normalize(
     ControllerState{commit_width, max_issue_width, commit_width});
@@ -112,7 +112,7 @@ DVSTOR_ADAPTIVE_FRONTIER_HD constexpr ControllerState make_controller_state(
 // width and reopens only one shadow slot every Commit-width queries.  This
 // avoids making every short query pay the same known-useless bootstrap read,
 // while retaining online recovery when frontier stability changes.
-DVSTOR_ADAPTIVE_FRONTIER_HD constexpr ControllerState query_begin_state(
+DUETANN_ADAPTIVE_FRONTIER_HD constexpr ControllerState query_begin_state(
     ControllerState state) {
   state = normalize(state);
   if (state.max_issue_width == state.commit_width) {
@@ -134,12 +134,12 @@ DVSTOR_ADAPTIVE_FRONTIER_HD constexpr ControllerState query_begin_state(
   return normalize(state);
 }
 
-DVSTOR_ADAPTIVE_FRONTIER_HD constexpr void begin_query(
+DUETANN_ADAPTIVE_FRONTIER_HD constexpr void begin_query(
     ControllerState& state) {
   state = query_begin_state(state);
 }
 
-DVSTOR_ADAPTIVE_FRONTIER_HD constexpr u64 ceil_ratio(
+DUETANN_ADAPTIVE_FRONTIER_HD constexpr u64 ceil_ratio(
     u64 numerator, u64 denominator) {
   if (numerator == 0 || denominator == 0) return 0;
   return 1u + (numerator - 1u) / denominator;
@@ -157,7 +157,7 @@ DVSTOR_ADAPTIVE_FRONTIER_HD constexpr u64 ceil_ratio(
 //
 // A critical miss is demand evidence only when the same wave produced useful
 // evidence; demand alone is ambiguous under a rapidly turning frontier.
-DVSTOR_ADAPTIVE_FRONTIER_HD constexpr ControllerState adapt_issue_width(
+DUETANN_ADAPTIVE_FRONTIER_HD constexpr ControllerState adapt_issue_width(
     ControllerState state, const Feedback& feedback) {
   state = normalize(state);
 
@@ -259,11 +259,11 @@ DVSTOR_ADAPTIVE_FRONTIER_HD constexpr ControllerState adapt_issue_width(
   return normalize(state);
 }
 
-DVSTOR_ADAPTIVE_FRONTIER_HD constexpr void update_issue_width(
+DUETANN_ADAPTIVE_FRONTIER_HD constexpr void update_issue_width(
     ControllerState& state, const Feedback& feedback) {
   state = adapt_issue_width(state, feedback);
 }
 
-#undef DVSTOR_ADAPTIVE_FRONTIER_HD
+#undef DUETANN_ADAPTIVE_FRONTIER_HD
 
 }  // namespace gpu_search::adaptive_frontier

@@ -1,37 +1,37 @@
-set(DVSTOR_TEST_SOURCE_DIR "${DVSTOR_SOURCE_ROOT}/test/runtime")
+set(DUETANN_TEST_SOURCE_DIR "${DUETANN_SOURCE_ROOT}/test/runtime")
 
-dvstor_add_test(common_atomic_utils_test)
-target_link_libraries(common_atomic_utils_test PRIVATE dvstor_runtime)
+duetann_add_test(common_atomic_utils_test)
+target_link_libraries(common_atomic_utils_test PRIVATE duetann_runtime)
 
-dvstor_add_test(adaptive_frontier_policy_test)
+duetann_add_test(adaptive_frontier_policy_test)
 target_sources(adaptive_frontier_policy_test PRIVATE
-    ${DVSTOR_SOURCE_ROOT}/src/common/configuration.cc)
+    ${DUETANN_SOURCE_ROOT}/src/common/configuration.cc)
 target_link_libraries(adaptive_frontier_policy_test PRIVATE rdma_library)
 
-dvstor_add_test(bounded_update_primitives_test)
-target_link_libraries(bounded_update_primitives_test PRIVATE dvstor_runtime)
+duetann_add_test(bounded_update_primitives_test)
+target_link_libraries(bounded_update_primitives_test PRIVATE duetann_runtime)
 
-dvstor_add_test(compute_update_hot_path_test)
-target_link_libraries(compute_update_hot_path_test PRIVATE dvstor_runtime)
+duetann_add_test(compute_update_hot_path_test)
+target_link_libraries(compute_update_hot_path_test PRIVATE duetann_runtime)
 
-dvstor_add_test(gpu_navigation_layout_test)
-target_link_libraries(gpu_navigation_layout_test PRIVATE dvstor_runtime)
+duetann_add_test(gpu_navigation_layout_test)
+target_link_libraries(gpu_navigation_layout_test PRIVATE duetann_runtime)
 
-dvstor_add_test(host_orchestrated_policy_test)
-target_link_libraries(host_orchestrated_policy_test PRIVATE dvstor_runtime)
+duetann_add_test(host_orchestrated_policy_test)
+target_link_libraries(host_orchestrated_policy_test PRIVATE duetann_runtime)
 
-dvstor_add_test(gpu_pq_index_test)
-target_link_libraries(gpu_pq_index_test PRIVATE dvstor_runtime)
+duetann_add_test(gpu_pq_index_test)
+target_link_libraries(gpu_pq_index_test PRIVATE duetann_runtime)
 
-dvstor_add_test(graph_extent_indexer_test
-    ${DVSTOR_TEST_SOURCE_DIR}/graph_extent_indexer_test.cc
+duetann_add_test(graph_extent_indexer_test
+    ${DUETANN_TEST_SOURCE_DIR}/graph_extent_indexer_test.cc
     ${CMAKE_SOURCE_DIR}/tools/vamana_offline/graph_extent_indexer.cc
     ${CMAKE_SOURCE_DIR}/tools/vamana_offline/progress.cc)
-dvstor_target_tool_includes(graph_extent_indexer_test)
-target_link_libraries(graph_extent_indexer_test PRIVATE dvstor_runtime)
+duetann_target_tool_includes(graph_extent_indexer_test)
+target_link_libraries(graph_extent_indexer_test PRIVATE duetann_runtime)
 
-dvstor_add_test(storage_reclaim_test)
-target_link_libraries(storage_reclaim_test PRIVATE dvstor_runtime)
+duetann_add_test(storage_reclaim_test)
+target_link_libraries(storage_reclaim_test PRIVATE duetann_runtime)
 
-dvstor_add_test(gpu_memory_budget_test)
-target_link_libraries(gpu_memory_budget_test PRIVATE dvstor_runtime)
+duetann_add_test(gpu_memory_budget_test)
+target_link_libraries(gpu_memory_budget_test PRIVATE duetann_runtime)

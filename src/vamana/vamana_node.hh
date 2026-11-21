@@ -13,9 +13,9 @@
 #include "vamana/graph_extent_policy.hh"
 
 #if defined(__CUDACC__)
-#define DVSTOR_VAMANA_NODE_HD __host__ __device__
+#define DUETANN_VAMANA_NODE_HD __host__ __device__
 #else
-#define DVSTOR_VAMANA_NODE_HD
+#define DUETANN_VAMANA_NODE_HD
 #endif
 
 /**
@@ -113,24 +113,24 @@ public:
   static constexpr u32 GRAPH_EXTENT_EDGES_PER_CLASS =
     vamana::graph_extent::kQuantumEdges;
 
-  DVSTOR_VAMANA_NODE_HD static constexpr u32 pack_dynamic_navigation_tag(
+  DUETANN_VAMANA_NODE_HD static constexpr u32 pack_dynamic_navigation_tag(
       u32 incarnation, u8 extent_class) {
     return (incarnation & DYNAMIC_CODE_INCARNATION_MASK) |
       (static_cast<u32>(extent_class) <<
        DYNAMIC_CODE_EXTENT_CLASS_SHIFT);
   }
 
-  DVSTOR_VAMANA_NODE_HD static constexpr u32
+  DUETANN_VAMANA_NODE_HD static constexpr u32
   dynamic_navigation_tag_incarnation(u32 tag) {
     return tag & DYNAMIC_CODE_INCARNATION_MASK;
   }
 
-  DVSTOR_VAMANA_NODE_HD static constexpr u8
+  DUETANN_VAMANA_NODE_HD static constexpr u8
   dynamic_navigation_tag_extent_class(u32 tag) {
     return static_cast<u8>(tag >> DYNAMIC_CODE_EXTENT_CLASS_SHIFT);
   }
 
-  DVSTOR_VAMANA_NODE_HD static constexpr u8 graph_extent_class(
+  DUETANN_VAMANA_NODE_HD static constexpr u8 graph_extent_class(
       u32 stable_count, u32 provisional_count) {
     const u32 total = stable_count + provisional_count;
     if (total < stable_count) return DYNAMIC_CODE_EXTENT_CLASS_UNKNOWN;
@@ -541,4 +541,4 @@ static_assert(
     RemotePtr::MAX_INCARNATION,
     VamanaNode::DYNAMIC_CODE_EXTENT_CLASS_UNKNOWN) < (u32{1} << 31));
 
-#undef DVSTOR_VAMANA_NODE_HD
+#undef DUETANN_VAMANA_NODE_HD

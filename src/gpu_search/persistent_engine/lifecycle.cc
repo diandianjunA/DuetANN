@@ -482,7 +482,7 @@ PersistentSearchEngine::Impl::~Impl() {
   device_free(d_query_dispatch_enqueue);
   control_bootstrapper.reset();
   if (owns_remote_buffer) device_free(d_remote_buffer);
-#ifdef DVSTOR_HAVE_GPUNETIO
+#ifdef DUETANN_HAVE_GPUNETIO
   direct_transport.reset();
 #endif
   device_free(d_dynamic_code_request_local_iovas);

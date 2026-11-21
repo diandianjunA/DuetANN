@@ -170,7 +170,7 @@ void MemoryNode::peer_rpc_progress_loop() {
         if (!peer_async_responses_->try_deliver_with_target(
               peer_id, slot_id, bytes, *header,
               &completion_target)) {
-          if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+          if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
               (header->type == static_cast<u32>(
                  service::storage_owner::PeerRpcType::reverse_update_response) ||
                header->type == static_cast<u32>(
@@ -188,7 +188,7 @@ void MemoryNode::peer_rpc_progress_loop() {
                         << std::endl;
             }
           }
-          if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+          if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
               header->type == static_cast<u32>(
                 service::storage_owner::PeerRpcType::cleanup_activate_response)) {
             static std::atomic<u32> debug_count{0};
@@ -214,7 +214,7 @@ void MemoryNode::peer_rpc_progress_loop() {
             bytes == expected_bytes) {
           const auto decision = peer_request_deduplicator_->begin(
             peer_id, *header, true);
-          if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+          if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
               decision.action != memory_node_detail::PeerRequestAction::execute &&
               decision.action != memory_node_detail::PeerRequestAction::replay) {
             static std::atomic<u32> debug_count{0};
@@ -258,7 +258,7 @@ void MemoryNode::peer_rpc_progress_loop() {
             bytes == expected_bytes) {
           const auto decision = peer_request_deduplicator_->begin(
             peer_id, *header, true);
-          if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+          if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
               decision.action != memory_node_detail::PeerRequestAction::execute &&
               decision.action != memory_node_detail::PeerRequestAction::replay) {
             static std::atomic<u32> debug_count{0};
@@ -428,7 +428,7 @@ void MemoryNode::peer_rpc_progress_loop() {
             task.received_at = std::chrono::steady_clock::now();
             task.payload.assign(payload, payload + expected_bytes);
             if (!enqueue_peer_physical_control_task(std::move(task))) {
-              if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+              if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
                   request_type == service::storage_owner::PeerRpcType::
                     cleanup_activate_request) {
                 static std::atomic<u32> debug_count{0};
@@ -696,7 +696,7 @@ void MemoryNode::peer_rpc_progress_loop() {
           header->item_count <= config.storage_owner_batch_max &&
           header->reserved == 0 && bytes == expected_bytes;
         if (!valid_response && cleanup_response &&
-            std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+            std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
           static std::atomic<u32> debug_count{0};
           if (debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
             std::cerr << "[cleanup-response-invalid] self=" << storage_id_
@@ -847,7 +847,7 @@ void MemoryNode::peer_reverse_update_worker_loop(u32 worker_id) {
       processed_items, std::memory_order_relaxed);
     if (!success) {
       peer_reverse_update_failed_.fetch_add(1, std::memory_order_relaxed);
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
           !reconcile_request) {
         static std::atomic<u32> debug_count{0};
         if (debug_count.fetch_add(1, std::memory_order_relaxed) < 128) {

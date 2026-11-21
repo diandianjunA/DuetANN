@@ -132,7 +132,7 @@ u64 MemoryNode::arm_storage_owner_maintenance_batch(
                    "duplicate physical Stage2 dependency");
         storage_owner_stage2_tasks_.push_back(std::move(tasks[item]));
       }
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         std::osyncstream(std::cerr) << "[stage2-arm] self=" << storage_id_
                   << " first_sequence=" << first_sequence
                   << " tasks=" << task_count
@@ -210,7 +210,7 @@ u64 MemoryNode::activate_storage_owner_cleanup_batch(
     };
     while (!storage_owner_maintenance_cv_.wait_for(
         lock, std::chrono::seconds(5), permit_available)) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         std::osyncstream(std::cerr) << "[cleanup-admission-wait] self=" << storage_id_
                   << " tasks=" << task_count
                   << " first_id=" << tasks.front().id
@@ -240,7 +240,7 @@ u64 MemoryNode::activate_storage_owner_cleanup_batch(
     first_sequence = try_begin_storage_owner_maintenance_batch(
       span<const u32>{work_items});
     if (first_sequence != 0) break;
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
         std::chrono::steady_clock::now() - last_debug >=
           std::chrono::seconds(5)) {
       last_debug = std::chrono::steady_clock::now();

@@ -18,7 +18,7 @@ namespace {
 
 struct TemporaryDirectory {
   fs::path path = fs::temp_directory_path() /
-    ("dvstor-index-metadata-test-" + std::to_string(::getpid()));
+    ("duetann-index-metadata-test-" + std::to_string(::getpid()));
 
   TemporaryDirectory() {
     std::error_code error;

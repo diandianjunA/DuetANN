@@ -69,7 +69,7 @@ bool MemoryNode::reconcile_local_reverse_ops(
     }
   }
   if (lease_merge) return reconcile_lease_merge_ops(ops, config, results);
-  if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+  if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
     std::cerr << std::string("[reconcile-stage] self=") +
       std::to_string(storage_id_) + " mode=one_sided ops=" +
       std::to_string(ops.size()) << std::endl;
@@ -177,7 +177,7 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
         vector.size <= mn_memory_bytes_ - vector.offset;
     };
 
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       std::cerr << std::string("[reconcile-stage] self=") +
         std::to_string(storage_id_) + " target=" +
         std::to_string(target_raw) + " point=before_lock" << std::endl;
@@ -366,7 +366,7 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
         // reconciliation operations delimit compatible ordinary-add runs;
         // this keeps mandatory/removal operation boundaries intact while
         // collapsing the common hot-target fan-in case to one RobustPrune.
-        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         std::cerr << std::string("[reconcile-stage] self=") +
           std::to_string(storage_id_) + " target=" +
           std::to_string(target_raw) + " point=before_snapshot" << std::endl;
@@ -525,7 +525,7 @@ bool MemoryNode::reconcile_reverse_ops_one_sided(
       !same_reconcile_neighbors(before_stable, adjacency.stable) ||
       !same_reconcile_neighbors(before_provisional,
                                 adjacency.provisional);
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       std::cerr << std::string("[reconcile-stage] self=") +
         std::to_string(storage_id_) + " target=" +
         std::to_string(target_raw) + " point=before_unlock" << std::endl;

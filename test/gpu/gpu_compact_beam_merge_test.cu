@@ -2,7 +2,7 @@
 
 #include "cuda_test_utils.hh"
 
-using dvstor_test::check_cuda;
+using duetann_test::check_cuda;
 
 #include <cfloat>
 #include <cstdint>
@@ -22,7 +22,7 @@ using gpu_search::u8;
 using gpu_search::u32;
 using gpu_search::u64;
 using gpu_search::persistent_kernel_detail::CandidateWorkspace;
-#if DVSTOR_PERSISTENT_LEGACY_MERGE
+#if DUETANN_PERSISTENT_LEGACY_MERGE
 using gpu_search::persistent_kernel_detail::merge_approximate_compact;
 #endif
 
@@ -80,7 +80,7 @@ __global__ void compact_merge_kernel(
   if (threadIdx.x == 0) beam_count = beam_capacity;
   __syncthreads();
   if (policy == BeamMergePolicy::legacy) {
-#if DVSTOR_PERSISTENT_LEGACY_MERGE
+#if DUETANN_PERSISTENT_LEGACY_MERGE
     merge_approximate_compact(
       candidate_handles, candidate_distances,
       beam_handles, beam_ids, beam_distances, beam_expanded,
@@ -150,7 +150,7 @@ void run_case(u32 beam_capacity) {
   copy_to_device(d_candidate_distances, candidate_distances);
   for (const BeamMergePolicy policy :
        {BeamMergePolicy::legacy, BeamMergePolicy::stable_run}) {
-#if !DVSTOR_PERSISTENT_LEGACY_MERGE
+#if !DUETANN_PERSISTENT_LEGACY_MERGE
     if (policy == BeamMergePolicy::legacy) continue;
 #endif
     // The register top-k reduction supports beam_capacity <=

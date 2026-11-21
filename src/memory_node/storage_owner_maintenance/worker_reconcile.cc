@@ -37,7 +37,7 @@ bool Stage2Worker::build_reconcile_barrier_ops(
         selected_ops = std::move(stable_ops);
         return true;
       case Stage2ReconcileBarrier::removal:
-        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+        if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
             task.id < 100000016) {
           std::cerr << "[stage2-bridge-debug] removal id=" << task.id
                     << " count=" << removal_ops.size();
@@ -75,7 +75,7 @@ bool Stage2Worker::begin_reconcile_barrier(
       Stage2Context& context, Stage2ReconcileBarrier barrier,
       span<const ReconcileReverseOp> ops) {
     const auto debug_failure = [&](const char* reason) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") == nullptr) return;
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") == nullptr) return;
       const auto now = std::chrono::steady_clock::now();
       const bool stalled = std::any_of(
         context.tasks.begin(), context.tasks.end(), [&](const auto& task) {
@@ -345,7 +345,7 @@ bool Stage2Worker::finish_stage2_after_reconcile(
     const auto failed = [&](const char* reason) {
       static std::atomic<u32> debug_count{0};
       const auto task_age = std::chrono::steady_clock::now() - task.queued_at;
-      if (((std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      if (((std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
             task_age > std::chrono::seconds(5)) ||
            task_age > std::chrono::seconds(60)) &&
           debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
@@ -368,7 +368,7 @@ bool Stage2Worker::finish_stage2_after_reconcile(
     lib_assert(!parent.is_null(),
                "Stage2 placement has no certificate parent");
     const auto trace = [&](const char* event, RemotePtr attempted = RemotePtr{}) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") == nullptr) return;
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") == nullptr) return;
       std::string message = std::string("[certificate-parent-trace] event=") +
         event + " self=" + std::to_string(node_.storage_id_) +
         " id=" + std::to_string(task.id) +

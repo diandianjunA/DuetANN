@@ -997,7 +997,7 @@ int main() {
   assert(!format::validate_view(malformed, &error));
 
   const auto code_path =
-    std::filesystem::temp_directory_path() / "dvstor-pq16-codes.bin";
+    std::filesystem::temp_directory_path() / "duetann-pq16-codes.bin";
   std::vector<byte_t> payload(32, 0x5a);
   format::CodeHeader code_header;
   code_header.memory_node = 0;
@@ -1091,7 +1091,7 @@ int main() {
   // medoid or a sampled static entry table. Query seeds arrive only through
   // validated storage-canonical centroid publications.
   const auto metadata_prefix =
-    std::filesystem::temp_directory_path() / "dvstor-layout-metadata-test";
+    std::filesystem::temp_directory_path() / "duetann-layout-metadata-test";
   const auto metadata_path =
     std::filesystem::path{metadata_prefix.string() + ".meta.json"};
   const std::vector<u64> counts{100, 100, 100, 100, 100};

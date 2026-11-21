@@ -127,7 +127,7 @@ vec<vec<u32>> build_cluster_knn_graph(const Dataset& dataset) {
 int main() {
   const TemporaryDirectory temporary{
     std::filesystem::temp_directory_path() /
-      ("dvstor_kmeans_partition_" + std::to_string(::getpid()))};
+      ("duetann_kmeans_partition_" + std::to_string(::getpid()))};
   std::filesystem::create_directories(temporary.path);
   const auto dataset_path = temporary.path / "base.fbin";
   write_synthetic_dataset(dataset_path);

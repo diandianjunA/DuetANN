@@ -241,7 +241,7 @@ bool MemoryNode::remove_local_neighbors_identity_fenced(
   using service::storage_owner::ReverseUpdateOp;
   const auto debug_failure = [&](const char* reason, RemotePtr target,
                                  u64 header) {
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") == nullptr) return;
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") == nullptr) return;
     static std::mutex debug_mutex;
     static std::unordered_map<u64, u32> debug_counts;
     std::lock_guard<std::mutex> debug_lock(debug_mutex);

@@ -136,7 +136,7 @@ bool Stage2Worker::consolidate_finalized_insertions() {
       if (state == StableNodeSnapshotState::retryable ||
           (state == StableNodeSnapshotState::stable &&
            !stage2_parent_is_stable(snapshot.header, snapshot.deleted))) {
-        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+        if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
           static std::atomic<u32> debug_count{0};
           if (debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
             std::osyncstream(std::cerr) << "[stage2-refine-stall] reason=target_state"
@@ -226,7 +226,7 @@ bool Stage2Worker::consolidate_finalized_insertions() {
       span<const ReconcileReverseOp>{ops}, &prune_config, &retry_mask);
     if (!applied) {
       retry_mask.assign(ops.size(), 1);
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         static std::atomic<u32> debug_count{0};
         if (debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
           std::osyncstream(std::cerr) << "[stage2-refine-stall] reason=apply"
@@ -328,7 +328,7 @@ bool Stage2Worker::finalize_context(Stage2Context& context) {
           }
         }
       }
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         for (const ReconcileReverseOp& op : releases) {
           std::osyncstream(std::cerr) << "[cleanup-certificate-release] self=" << node_.storage_id_
                     << " id=" << op.id << " sequence=" << op.placement_sequence
@@ -585,7 +585,7 @@ bool Stage2Worker::drive_context(Stage2Context& context) {
 
 bool Stage2Worker::drive_owned_context(Stage2Context& context) {
     const bool protocol_stall_debug =
-      std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr ||
+      std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr ||
       std::any_of(context.tasks.begin(), context.tasks.end(),
         [](const StorageOwnerMaintenanceTask& task) {
           return std::chrono::steady_clock::now() - task.queued_at >
@@ -871,7 +871,7 @@ Stage2Worker::Stage2Context* Stage2Worker::try_admit_context() {
         !node_.storage_owner_cleanup_tasks_.empty() &&
         admission_now - node_.storage_owner_cleanup_tasks_.front().queued_at >
           std::chrono::seconds(60);
-      if ((std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr ||
+      if ((std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr ||
            cleanup_stuck) &&
           !node_.storage_owner_cleanup_tasks_.empty() &&
           cleanup_debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
@@ -967,7 +967,7 @@ Stage2Worker::Stage2Context* Stage2Worker::try_admit_context() {
     node_.notify_storage_owner_maintenance_capacity();
     lib_assert(!context.tasks.empty(),
                "stage2 admitted an empty maintenance context");
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       std::osyncstream(std::cerr) << "[stage2-admit] worker=" << worker_id_
                 << " slot=" << context.handle.slot
                 << " generation=" << context.handle.generation

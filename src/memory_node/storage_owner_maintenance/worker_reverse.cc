@@ -31,7 +31,7 @@ void Stage2Worker::release_context_lane(Stage2Context& context) {
 
 bool Stage2Worker::bind_context_lane(Stage2Context& context) {
     const auto debug_failure = [&](const char* reason) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") == nullptr ||
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") == nullptr ||
           context.tasks.empty() ||
           std::chrono::steady_clock::now() - context.tasks.front().queued_at <=
             std::chrono::seconds(5)) {
@@ -91,7 +91,7 @@ bool Stage2Worker::release_rebindable_context_lane(Stage2Context& context) {
 
 
 void Stage2Worker::reset_context(Stage2Context& context) {
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
         context.active && !context.tasks.empty()) {
       std::osyncstream(std::cerr) << "[stage2-reset] worker=" << worker_id_
                 << " slot=" << context.handle.slot
@@ -273,7 +273,7 @@ void Stage2Worker::materialize_stable_identity_wave(size_t task_count) {
       }
     }
     static std::atomic<u32> identity_debug_count{0};
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
         identity_debug_count.fetch_add(1, std::memory_order_relaxed) < 12) {
       std::osyncstream(std::cerr) << "[stage2-identity-debug] worker=" << worker_id_
                 << " targets=" << snapshot_plan.targets.size()
@@ -385,7 +385,7 @@ bool Stage2Worker::apply_reconcile_ops(
       const Configuration* prune_config, vec<u8>* retry_mask) {
     const auto debug_failure = [&](const char* reason,
                                    span<const ReconcileReverseOp> failed_ops) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") == nullptr) return;
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") == nullptr) return;
       static std::mutex debug_mutex;
       static std::unordered_map<u64, u32> debug_counts;
       for (const auto& op : failed_ops) {
@@ -713,7 +713,7 @@ bool Stage2Worker::reparent_cleanup_children(
         static std::atomic<u32> debug_count{0};
         const auto task_age =
           std::chrono::steady_clock::now() - task.queued_at;
-        if ((std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr ||
+        if ((std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr ||
              task_age > std::chrono::seconds(60)) &&
             debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
           std::osyncstream(std::cerr) << "[cleanup-reparent-debug] self=" << node_.storage_id_
@@ -892,7 +892,7 @@ bool Stage2Worker::append_stage2_reconcile_ops(
       task.stage2_promotion_committed
         ? task.stage2_promotion_parent : RemotePtr{});
     if (plan.promotion_target.is_null()) {
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
           std::chrono::steady_clock::now() - task.queued_at >
             std::chrono::seconds(5)) {
         static std::atomic<u32> debug_count{0};
@@ -910,7 +910,7 @@ bool Stage2Worker::append_stage2_reconcile_ops(
     }
 
     static std::atomic<u32> planner_debug_count{0};
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
         planner_debug_count.fetch_add(1, std::memory_order_relaxed) < 12) {
       std::osyncstream(std::cerr) << "[stage2-planner-debug] id=" << task.id
                 << " final=" << task.stage2_neighbors.size()
@@ -1038,7 +1038,7 @@ bool Stage2Worker::complete_stale_stage2(StorageOwnerMaintenanceTask& task,
       static std::atomic<u32> debug_count{0};
       const auto task_age =
         std::chrono::steady_clock::now() - task.queued_at;
-      if (((std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+      if (((std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
             task_age > std::chrono::seconds(5)) ||
            task_age > std::chrono::seconds(60)) &&
           debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
@@ -1099,7 +1099,7 @@ bool Stage2Worker::complete_stale_stage2(StorageOwnerMaintenanceTask& task,
         task.stage2_promotion_parent,
         span<const RemotePtr>{task.stage2_replaced_certificate_parents});
       releases.reserve(parents.size());
-      if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+      if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
         std::string message = std::string("[certificate-stale-release] self=") +
           std::to_string(node_.storage_id_) + " id=" + std::to_string(task.id) +
           " sequence=" + std::to_string(task.maintenance_sequence) +
@@ -1411,7 +1411,7 @@ bool Stage2Worker::poll_owned_reverse_aggregates() {
 
       if (response == TryPeerResponse::failure ||
           response == TryPeerResponse::stale) {
-        if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr &&
+        if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr &&
             aggregate->retry_attempts >= 3 &&
             ((aggregate->retry_attempts + 1) &
              aggregate->retry_attempts) == 0) {
@@ -1482,7 +1482,7 @@ bool Stage2Worker::poll_owned_reverse_aggregates() {
       static std::atomic<u32> debug_count{0};
       if ((response == TryPeerResponse::failure ||
            response == TryPeerResponse::stale || timed_out) &&
-          (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr ||
+          (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr ||
            aggregate->retry_attempts >= 3) &&
           debug_count.fetch_add(1, std::memory_order_relaxed) < 64) {
         std::osyncstream(std::cerr) << "[reverse-ack-debug] self=" << node_.storage_id_

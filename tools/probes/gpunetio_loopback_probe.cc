@@ -441,7 +441,7 @@ int main(int argc, char** argv) {
   }
 
   const bool payload_sweep =
-    environment_enabled("DVSTOR_GPUNETIO_PAYLOAD_SWEEP");
+    environment_enabled("DUETANN_GPUNETIO_PAYLOAD_SWEEP");
   if (connection_manager.server_qps.empty() ||
       connection_manager.server_qps.size() >
         std::numeric_limits<u32>::max() / parameters.gpu_rdma_qps) {
@@ -449,14 +449,14 @@ int main(int argc, char** argv) {
   }
   const u32 qp_count = parameters.gpu_rdma_qps *
     static_cast<u32>(connection_manager.server_qps.size());
-  const u32 blocks = environment_u32("DVSTOR_GPUNETIO_STRESS_BLOCKS", 64);
+  const u32 blocks = environment_u32("DUETANN_GPUNETIO_STRESS_BLOCKS", 64);
   const u32 iterations =
-    environment_u32("DVSTOR_GPUNETIO_STRESS_ITERATIONS", 32);
+    environment_u32("DUETANN_GPUNETIO_STRESS_ITERATIONS", 32);
   const u32 legacy_batch_reads =
-    environment_u32("DVSTOR_GPUNETIO_BATCH_READS", 1);
+    environment_u32("DUETANN_GPUNETIO_BATCH_READS", 1);
   if (legacy_batch_reads > gpu_search::kPersistentMaxExact) {
     throw std::runtime_error(
-      "DVSTOR_GPUNETIO_BATCH_READS exceeds kernel capacity");
+      "DUETANN_GPUNETIO_BATCH_READS exceeds kernel capacity");
   }
   const u32 legacy_worker_count =
     std::min<u32>(parameters.gpu_rdma_qps, 4);
@@ -465,22 +465,22 @@ int main(int argc, char** argv) {
 
   const std::vector<u32> payload_bytes = payload_sweep
     ? environment_u32_list(
-        "DVSTOR_GPUNETIO_PAYLOAD_BYTES",
+        "DUETANN_GPUNETIO_PAYLOAD_BYTES",
         {16, 80, 144, 272, 400, 448, 528, 832})
     : std::vector<u32>{};
   const std::vector<u32> paired_body_bytes = payload_sweep
     ? environment_u32_list(
-        "DVSTOR_GPUNETIO_PAIRED_BODY_BYTES", {400, 448})
+        "DUETANN_GPUNETIO_PAIRED_BODY_BYTES", {400, 448})
     : std::vector<u32>{};
   const u32 payload_batch_reads = payload_sweep
-    ? environment_u32("DVSTOR_GPUNETIO_PAYLOAD_BATCH_READS", 16) : 1;
+    ? environment_u32("DUETANN_GPUNETIO_PAYLOAD_BATCH_READS", 16) : 1;
   const u32 payload_measured_batches = payload_sweep
-    ? environment_u32("DVSTOR_GPUNETIO_PAYLOAD_ITERATIONS", 512) : 1;
+    ? environment_u32("DUETANN_GPUNETIO_PAYLOAD_ITERATIONS", 512) : 1;
   const u32 payload_warmup_batches = payload_sweep
-    ? environment_u32("DVSTOR_GPUNETIO_PAYLOAD_WARMUP_ITERATIONS", 32) : 1;
+    ? environment_u32("DUETANN_GPUNETIO_PAYLOAD_WARMUP_ITERATIONS", 32) : 1;
   std::vector<u32> payload_active_qps = payload_sweep
     ? environment_u32_list(
-        "DVSTOR_GPUNETIO_PAYLOAD_ACTIVE_QPS_LIST",
+        "DUETANN_GPUNETIO_PAYLOAD_ACTIVE_QPS_LIST",
         {1, std::min<u32>(8, qp_count), std::min<u32>(32, qp_count), qp_count})
     : std::vector<u32>{1};
   std::sort(payload_active_qps.begin(), payload_active_qps.end());
@@ -489,14 +489,14 @@ int main(int argc, char** argv) {
     payload_active_qps.end());
   if (payload_active_qps.back() > qp_count) {
     throw std::runtime_error(
-      "DVSTOR_GPUNETIO_PAYLOAD_ACTIVE_QPS_LIST exceeds the available QP count");
+      "DUETANN_GPUNETIO_PAYLOAD_ACTIVE_QPS_LIST exceeds the available QP count");
   }
   const u32 maximum_payload_workers = payload_active_qps.back();
   const u32 payload_repeats = payload_sweep
-    ? environment_u32("DVSTOR_GPUNETIO_PAYLOAD_REPEATS", 3) : 1;
+    ? environment_u32("DUETANN_GPUNETIO_PAYLOAD_REPEATS", 3) : 1;
   const uint64_t requested_remote_span_bytes = payload_sweep
     ? environment_u32(
-        "DVSTOR_GPUNETIO_PAYLOAD_REMOTE_SPAN_BYTES", 64u * 1024u * 1024u)
+        "DUETANN_GPUNETIO_PAYLOAD_REMOTE_SPAN_BYTES", 64u * 1024u * 1024u)
     : 832;
   const uint64_t payload_remote_span_bytes =
     requested_remote_span_bytes / 832 * 832;
@@ -505,12 +505,12 @@ int main(int argc, char** argv) {
   if (payload_remote_span_bytes < 832 ||
       payload_remote_span_bytes > configured_remote_region_bytes) {
     throw std::runtime_error(
-      "DVSTOR_GPUNETIO_PAYLOAD_REMOTE_SPAN_BYTES is outside the "
+      "DUETANN_GPUNETIO_PAYLOAD_REMOTE_SPAN_BYTES is outside the "
       "configured remote memory region");
   }
   if (payload_batch_reads > 16) {
     throw std::runtime_error(
-      "DVSTOR_GPUNETIO_PAYLOAD_BATCH_READS must be <= 16");
+      "DUETANN_GPUNETIO_PAYLOAD_BATCH_READS must be <= 16");
   }
   u32 maximum_stage_bytes = 0;
   if (payload_sweep) {

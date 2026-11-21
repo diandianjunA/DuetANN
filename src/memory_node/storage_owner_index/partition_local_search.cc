@@ -68,7 +68,7 @@ vec<RemotePtr> MemoryNode::partition_local_search_candidates(
   const auto trace_retry = [&](const char* boundary, RemotePtr candidate,
                                u64 before, u64 after, u32 slot_incarnation,
                                std::chrono::steady_clock::time_point started) {
-    if (std::getenv("DVSTOR_SEARCH_STALL_DEBUG") == nullptr) return;
+    if (std::getenv("DUETANN_SEARCH_STALL_DEBUG") == nullptr) return;
     const auto now = std::chrono::steady_clock::now();
     if (now - started < std::chrono::seconds(5)) return;
     thread_local u64 last_log_ns = 0;

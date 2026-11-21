@@ -32,7 +32,7 @@ using CentroidMembershipKind = service::storage_owner::CentroidMembershipKind;
 
 inline bool storage_owner_consolidation_enabled() {
   static const bool enabled = []() {
-    const char* value = std::getenv("DVSTOR_CONSOLIDATE_ON_IDLE");
+    const char* value = std::getenv("DUETANN_CONSOLIDATE_ON_IDLE");
     return value == nullptr || (value[0] == '1' && value[1] == '\0');
   }();
   return enabled;
@@ -40,7 +40,7 @@ inline bool storage_owner_consolidation_enabled() {
 
 inline bool storage_owner_pipeline_refinement_enabled() {
   static const bool enabled = []() {
-    const char* value = std::getenv("DVSTOR_PIPELINE_REFINEMENT");
+    const char* value = std::getenv("DUETANN_PIPELINE_REFINEMENT");
     return value == nullptr || (value[0] == '1' && value[1] == '\0');
   }();
   return storage_owner_consolidation_enabled() && enabled;
@@ -48,7 +48,7 @@ inline bool storage_owner_pipeline_refinement_enabled() {
 
 inline bool storage_owner_reuse_stage1_beam() {
   static const bool enabled = []() {
-    const char* value = std::getenv("DVSTOR_REUSE_STAGE1_BEAM");
+    const char* value = std::getenv("DUETANN_REUSE_STAGE1_BEAM");
     return value == nullptr || (value[0] == '1' && value[1] == '\0');
   }();
   return enabled;

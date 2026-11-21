@@ -7,12 +7,12 @@ namespace memory_node_storage_owner_maintenance_detail {
 
 Stage2SearchAdvanceResult Stage2Worker::prepare_local(Stage2Context& context) {
     const bool trace_search =
-      std::getenv("DVSTOR_SEARCH_STALL_DEBUG") != nullptr;
+      std::getenv("DUETANN_SEARCH_STALL_DEBUG") != nullptr;
     const auto debug_wait = [&](const char* reason,
                                 const StorageOwnerMaintenanceTask& task,
                                 u64 header = 0) {
       const auto age = std::chrono::steady_clock::now() - task.queued_at;
-      if ((!trace_search && std::getenv("DVSTOR_STAGE2_STALL_DEBUG") == nullptr) ||
+      if ((!trace_search && std::getenv("DUETANN_STAGE2_STALL_DEBUG") == nullptr) ||
           age <= std::chrono::seconds(trace_search ? 5 : 60)) {
         return;
       }
@@ -27,7 +27,7 @@ Stage2SearchAdvanceResult Stage2Worker::prepare_local(Stage2Context& context) {
                 << " target=" << task.target.raw_address
                 << " header=" << header << std::endl;
     };
-    if ((trace_search || std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) &&
+    if ((trace_search || std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) &&
         !context.tasks.empty() &&
         std::chrono::steady_clock::now() - context.tasks.front().queued_at >
           std::chrono::seconds(5)) {

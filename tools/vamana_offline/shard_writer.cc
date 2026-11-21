@@ -976,7 +976,7 @@ void write_vamana_shards(const VamanaGraph& graph,
     // Ship each shard synchronously after validation so completed shards do
     // not accumulate locally; export_threads bounds concurrent shipments.
     // The final publish step skips shards whose temporary file was moved away.
-    if (const char* hook = std::getenv("DVSTOR_SHARD_HOOK")) {
+    if (const char* hook = std::getenv("DUETANN_SHARD_HOOK")) {
       if (hook[0] != 0) {
         const std::string command = std::string(hook) + " " +
           shard_temporary_paths[shard].string() + " " +

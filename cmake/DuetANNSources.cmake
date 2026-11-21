@@ -1,6 +1,6 @@
 include_guard(GLOBAL)
 
-set(DVSTOR_MEMORY_NODE_SOURCES
+set(DUETANN_MEMORY_NODE_SOURCES
     src/common/configuration.cc
     src/gpu_search/index_format.cc
     src/gpu_search/pq_index.cc
@@ -44,7 +44,7 @@ set(DVSTOR_MEMORY_NODE_SOURCES
     src/vamana/centroid_router.cc
 )
 
-set(DVSTOR_OFFLINE_BUILDER_SOURCES
+set(DUETANN_OFFLINE_BUILDER_SOURCES
     tools/vamana_offline/checkpoint.cc
     tools/vamana_offline/config.cc
     tools/vamana_offline/dataset_io.cc
@@ -55,47 +55,47 @@ set(DVSTOR_OFFLINE_BUILDER_SOURCES
     tools/vamana_offline/shard_writer.cc
 )
 
-set(DVSTOR_PQ_INDEXER_SOURCES
+set(DUETANN_PQ_INDEXER_SOURCES
     src/gpu_search/index_format.cc
     src/gpu_search/pq_index.cc
     tools/vamana_offline/pq_indexer.cc
     tools/vamana_offline/progress.cc
 )
 
-set(DVSTOR_GRAPH_EXTENT_INDEXER_SOURCES
+set(DUETANN_GRAPH_EXTENT_INDEXER_SOURCES
     src/gpu_search/index_format.cc
     tools/vamana_offline/graph_extent_indexer.cc
     tools/vamana_offline/progress.cc
 )
 
-set(DVSTOR_BREAKDOWN_SUPPORT_SOURCES
+set(DUETANN_BREAKDOWN_SUPPORT_SOURCES
     tools/breakdown_benchmark/dataset.cc
     tools/breakdown_benchmark/maintenance_log.cc
     tools/breakdown_benchmark/report.cc
 )
 
-set(DVSTOR_BREAKDOWN_BENCHMARK_SOURCES
+set(DUETANN_BREAKDOWN_BENCHMARK_SOURCES
     tools/breakdown_benchmark/args.cc
     tools/breakdown_benchmark/progress.cc
     tools/breakdown_benchmark/workload.cc
 )
 
-set(DVSTOR_METIS_REPARTITIONER_SOURCES
-    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/metis_repartitioner.cc
-    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/checkpoint.cc
-    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/dataset_io.cc
-    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/graph.cc
-    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/partitioning.cc
-    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/progress.cc
-    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/shard_writer.cc
-    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/pq_indexer.cc
-    ${DVSTOR_SOURCE_ROOT}/tools/vamana_offline/graph_extent_indexer.cc
-    ${DVSTOR_SOURCE_ROOT}/src/service/index_metadata.cc
-    ${DVSTOR_SOURCE_ROOT}/src/gpu_search/index_format.cc
-    ${DVSTOR_SOURCE_ROOT}/src/gpu_search/pq_index.cc
+set(DUETANN_METIS_REPARTITIONER_SOURCES
+    ${DUETANN_SOURCE_ROOT}/tools/vamana_offline/metis_repartitioner.cc
+    ${DUETANN_SOURCE_ROOT}/tools/vamana_offline/checkpoint.cc
+    ${DUETANN_SOURCE_ROOT}/tools/vamana_offline/dataset_io.cc
+    ${DUETANN_SOURCE_ROOT}/tools/vamana_offline/graph.cc
+    ${DUETANN_SOURCE_ROOT}/tools/vamana_offline/partitioning.cc
+    ${DUETANN_SOURCE_ROOT}/tools/vamana_offline/progress.cc
+    ${DUETANN_SOURCE_ROOT}/tools/vamana_offline/shard_writer.cc
+    ${DUETANN_SOURCE_ROOT}/tools/vamana_offline/pq_indexer.cc
+    ${DUETANN_SOURCE_ROOT}/tools/vamana_offline/graph_extent_indexer.cc
+    ${DUETANN_SOURCE_ROOT}/src/service/index_metadata.cc
+    ${DUETANN_SOURCE_ROOT}/src/gpu_search/index_format.cc
+    ${DUETANN_SOURCE_ROOT}/src/gpu_search/pq_index.cc
 )
 
-set(DVSTOR_RUNTIME_SOURCES
+set(DUETANN_RUNTIME_SOURCES
     src/common/configuration.cc
     src/common/core_assignment.cc
     src/common/timing.cc

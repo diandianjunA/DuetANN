@@ -71,7 +71,7 @@ PersistentKernelOccupancy inspect_persistent_search_kernel(u32 threads,
         ? select_persistent_search_kernel<128, true>(pq_subquantizers)
         : select_persistent_search_kernel<128, false>(pq_subquantizers);
   } else {
-#if DVSTOR_PERSISTENT_WIDE_SORT
+#if DUETANN_PERSISTENT_WIDE_SORT
     kernel =
       enable_asfe
         ? select_persistent_search_kernel<256, true>(pq_subquantizers)
@@ -123,7 +123,7 @@ void launch_persistent_search(cudaStream_t stream,
       launch_persistent_search_kernel<128, false>(stream, params, blocks);
     }
   } else if (threads == 256) {
-#if DVSTOR_PERSISTENT_WIDE_SORT
+#if DUETANN_PERSISTENT_WIDE_SORT
     if (decoupled_search_progression) {
       launch_persistent_search_kernel<256, true>(stream, params, blocks);
     } else {
@@ -132,7 +132,7 @@ void launch_persistent_search(cudaStream_t stream,
 #else
     throw std::invalid_argument(
       "persistent search kernel was built without 256-thread support "
-      "(DVSTOR_PERSISTENT_WIDE_SORT=OFF)");
+      "(DUETANN_PERSISTENT_WIDE_SORT=OFF)");
 #endif
   } else {
     throw std::invalid_argument(

@@ -115,7 +115,7 @@ class CertificateLeaseTable {
       }
       updated[child].insert(sequence);
     }
-    if (std::getenv("DVSTOR_STAGE2_STALL_DEBUG") != nullptr) {
+    if (std::getenv("DUETANN_STAGE2_STALL_DEBUG") != nullptr) {
       const auto trace = [&](const char* action, std::uint64_t child,
                              std::uint64_t sequence) {
         const auto found = updated.find(child);
