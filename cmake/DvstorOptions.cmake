@@ -7,6 +7,8 @@ option(DVSTOR_BUILD_OFFLINE_TOOLS
 option(DVSTOR_USE_NATIVE_ARCH "Compile C++ sources with -march=native" ON)
 option(DVSTOR_PERSISTENT_WIDE_SORT "Build the wide persistent Beam sort for ablation" OFF)
 option(DVSTOR_PERSISTENT_LEGACY_MERGE "Build the legacy persistent Beam merge for ablation" OFF)
+option(DVSTOR_PERSISTENT_COMPACT_LEGACY_SCRATCH
+    "Use terminal-only legacy scratch to fit wider Beams on V100" OFF)
 
 set(DVSTOR_PERSISTENT_MAX_BEAM "256" CACHE STRING
     "Maximum traversal Beam compiled into the persistent kernel (128 or 256)")

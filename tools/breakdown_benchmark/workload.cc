@@ -90,6 +90,7 @@ u64 checked_query_row_sum(u64 first, u64 second) {
 }
 
 u64 required_performance_query_rows(const Args& args) {
+  if (args.performance_query_mode == "cyclic") return 0;
   if (args.workload == "mixed" && args.mixed_mode == "rate_limited") {
     return checked_query_row_sum(
       PacedOperationDispatcher::scheduled_count(
@@ -529,6 +530,7 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
   // the first phase instead of letting the later query reporter overwrite it,
   // so stability never interprets a query-only window as a write stall.
   std::vector<ProgressSample> measure_insert_windows;
+  std::vector<QueryLatencyWindow> measure_query_latency_windows;
 
   auto run_insert_phase_ops = [&](const std::string& label, size_t ops,
                                   uint32_t start_id) -> size_t {
@@ -669,7 +671,7 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
               << performance_query_rows.count
               << " dtype=" << vector_dtype_name(performance_query_rows.dtype)
               << " vector_bytes=" << performance_query_rows.vector_bytes
-              << " policy=single_pass_no_reuse" << std::endl;
+              << " policy=" << args.performance_query_mode << std::endl;
     if (args.workload == "mixed" && args.mixed_mode == "rate_limited") {
       const uint64_t required_rows =
         required_performance_query_rows(args);
@@ -705,12 +707,13 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     {"rows", performance_query_rows.count},
     {"data_type", performance_query_rows.count == 0 ? "" : vector_dtype_name(performance_query_rows.dtype)},
     {"vector_bytes", performance_query_rows.vector_bytes},
-    {"row_reuse_policy", "single_pass_no_reuse"},
+    {"row_reuse_policy", args.performance_query_mode},
     {"row_reuse_count", 0},
     {"rate_limited_required_rows", rate_limited_required_query_rows},
   };
 
-  SinglePassRowStream performance_query_stream(performance_query_rows.count);
+  PerformanceQueryStream performance_query_stream(
+    performance_query_rows.count, args.performance_query_mode == "cyclic");
   auto throw_if_performance_queries_exhausted = [&](const std::string& phase) {
     if (!workload_has_queries || !performance_query_stream.exhausted()) {
       return;
@@ -897,12 +900,13 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     std::exception_ptr error;
     std::mutex error_mutex;
     std::chrono::steady_clock::time_point deadline;
+    std::optional<QueryLatencyRecorder> query_latency;
     std::barrier start_barrier(
       static_cast<std::ptrdiff_t>(args.client_threads + 1));
     std::vector<std::thread> workers;
     workers.reserve(args.client_threads);
     for (size_t worker = 0; worker < args.client_threads; ++worker) {
-      workers.emplace_back([&]() {
+      workers.emplace_back([&, worker]() {
         start_barrier.arrive_and_wait();
         try {
           while (!failed.load(std::memory_order_acquire) &&
@@ -910,9 +914,17 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
                  std::chrono::steady_clock::now() < deadline) {
             const auto query_row = performance_query_stream.try_claim();
             if (!query_row.has_value()) break;
+            std::chrono::steady_clock::time_point query_started;
+            if (query_latency.has_value()) {
+              query_started = std::chrono::steady_clock::now();
+            }
             (void)service.search_raw(
               performance_query_rows.dtype,
               performance_query_rows.raw_row(*query_row), dim, service.config().k);
+            if (query_latency.has_value()) {
+              query_latency->record(
+                worker, query_started, std::chrono::steady_clock::now());
+            }
             completed_ops.fetch_add(1, std::memory_order_relaxed);
           }
         } catch (...) {
@@ -928,6 +940,9 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
                               &completed_ops, nullptr);
     const auto phase_start = std::chrono::steady_clock::now();
     deadline = phase_start + std::chrono::seconds(seconds);
+    if (label.starts_with("measure-")) {
+      query_latency.emplace(args.client_threads, phase_start, seconds);
+    }
     start_barrier.arrive_and_wait();
     for (auto& worker : workers) worker.join();
     const double drain_seconds = std::max(
@@ -935,7 +950,10 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
              std::chrono::steady_clock::now() - deadline).count());
     reporter.finish();
     if (error != nullptr) std::rethrow_exception(error);
-    if (label.starts_with("measure-")) measure_windows = reporter.samples();
+    if (label.starts_with("measure-")) {
+      measure_windows = reporter.samples();
+      measure_query_latency_windows = query_latency->windows(5);
+    }
     throw_if_performance_queries_exhausted(label);
     return {
       .completed = completed_ops.load(std::memory_order_relaxed),
@@ -1317,6 +1335,7 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     std::vector<std::thread> threads;
     threads.reserve(args.client_threads);
     std::chrono::steady_clock::time_point deadline;
+    std::optional<QueryLatencyRecorder> query_latency;
     std::optional<PacedOperationDispatcher> pacer;
     std::optional<PacedOperationDispatcher> write_pacer;
     if (shared_rate_limited) {
@@ -1360,10 +1379,18 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
               const auto query_row = performance_query_stream.try_claim();
               if (!query_row.has_value()) break;
               issued_reads.fetch_add(1, std::memory_order_relaxed);
+              std::chrono::steady_clock::time_point query_started;
+              if (query_latency.has_value()) {
+                query_started = std::chrono::steady_clock::now();
+              }
               (void)service.search_raw(
                 performance_query_rows.dtype,
                 performance_query_rows.raw_row(*query_row), dim,
                 service.config().k);
+              if (query_latency.has_value()) {
+                query_latency->record(
+                  tid, query_started, std::chrono::steady_clock::now());
+              }
               completed_reads.fetch_add(1, std::memory_order_relaxed);
             } else {
               issued_writes.fetch_add(1, std::memory_order_relaxed);
@@ -1399,6 +1426,9 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
                               &completed_reads, &completed_writes);
     const auto phase_start = std::chrono::steady_clock::now();
     deadline = phase_start + std::chrono::seconds(seconds);
+    if (label.starts_with("measure-")) {
+      query_latency.emplace(args.client_threads, phase_start, seconds);
+    }
     if (pacer.has_value()) pacer->start(phase_start, deadline);
     if (write_pacer.has_value()) write_pacer->start(phase_start, deadline);
     start_barrier.arrive_and_wait();
@@ -1410,7 +1440,10 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
              std::chrono::steady_clock::now() - deadline).count());
     reporter.finish();
     if (error != nullptr) std::rethrow_exception(error);
-    if (label.starts_with("measure-")) measure_windows = reporter.samples();
+    if (label.starts_with("measure-")) {
+      measure_windows = reporter.samples();
+      measure_query_latency_windows = query_latency->windows(5);
+    }
     throw_if_performance_queries_exhausted(label);
     return MixedPhaseStats{
       .next_insert_id = next_insert_id.load(std::memory_order_relaxed),
@@ -1791,7 +1824,12 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
   root["meta"]["performance_query"]["total_rows_consumed"] =
     total_performance_queries;
   root["meta"]["performance_query"]["remaining_rows"] =
+    args.performance_query_mode == "cyclic" ? 0 :
     performance_query_stream.capacity() - total_performance_queries;
+  root["meta"]["performance_query"]["row_reuse_count"] =
+    args.performance_query_mode == "cyclic" &&
+        total_performance_queries > performance_query_stream.capacity()
+      ? total_performance_queries - performance_query_stream.capacity() : 0;
 
   if (!args.recall_only && args.workload == "mixed") {
     root["meta"]["warmup_mixed"] = {
@@ -2070,9 +2108,26 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
       query_windows_expected, write_windows_expected});
   }
   for (const StabilityPhase& phase : stability_phases) {
+    size_t phase_window_index = 0;
     for (const ProgressSample& sample : *phase.samples) {
       const bool within_measurement_window = !has_throughput_duration ||
         sample.elapsed_seconds <= stability_window_deadline;
+      nlohmann::json query_latency = nullptr;
+      if (phase.expects_queries &&
+          phase_window_index < measure_query_latency_windows.size()) {
+        const auto& latency = measure_query_latency_windows[phase_window_index];
+        query_latency = {
+          {"samples", latency.samples},
+          {"average_ms", latency.samples == 0 ? nlohmann::json(nullptr)
+            : nlohmann::json(latency.average_ns / 1e6)},
+          {"p50_ms", latency.samples == 0 ? nlohmann::json(nullptr)
+            : nlohmann::json(latency.p50_ns / 1e6)},
+          {"p95_ms", latency.samples == 0 ? nlohmann::json(nullptr)
+            : nlohmann::json(latency.p95_ns / 1e6)},
+          {"p99_ms", latency.samples == 0 ? nlohmann::json(nullptr)
+            : nlohmann::json(latency.p99_ns / 1e6)},
+        };
+      }
       window_json.push_back({
         {"phase", phase.name},
         {"elapsed_seconds", sample.elapsed_seconds},
@@ -2084,8 +2139,10 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
         {"total_ops_per_sec", sample.total_ops_per_sec},
         {"query_ops_per_sec", sample.query_ops_per_sec},
         {"write_ops_per_sec", sample.write_ops_per_sec},
+        {"query_latency", query_latency},
         {"within_measurement_window", within_measurement_window},
       });
+      ++phase_window_index;
       if (!within_measurement_window || sample.interval_seconds < 2.5) {
         continue;
       }
@@ -2137,6 +2194,9 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
   const double write_tail_qps = edge_mean(write_window_rates, true);
   root["stability"] = {
     {"window_seconds", 5},
+    {"query_latency_scope", "client_search_raw_end_to_end_by_completion_time"},
+    {"query_latency_window_estimator",
+     "exact_count_and_mean; deterministic_per_worker_reservoir_percentiles; 64_samples_per_worker_per_window"},
     {"windows", std::move(window_json)},
     {"zero_completion_windows", zero_completion_windows},
     {"zero_query_windows", zero_query_windows},
@@ -2155,7 +2215,7 @@ nlohmann::json run_benchmark(ComputeService& service, const Args& args) {
     {"write_min_window_ops_per_sec", minimum_rate(write_window_rates)},
     {"write_tail_to_head_ratio", write_head_qps == 0.0 ? 0.0
       : write_tail_qps / write_head_qps},
-    {"single_pass_no_reuse", true},
+    {"single_pass_no_reuse", args.performance_query_mode == "single_pass"},
     {"direct_remote_read_baseline", true},
   };
   if (!args.recall_only) {

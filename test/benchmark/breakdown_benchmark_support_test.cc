@@ -120,7 +120,7 @@ void test_groundtruth_file_reader_rejects_size_mismatch() {
 
 void test_single_pass_stream() {
   constexpr size_t row_count = 257;
-  tools::breakdown_benchmark::SinglePassRowStream stream(row_count);
+  tools::breakdown_benchmark::PerformanceQueryStream stream(row_count);
   std::array<std::atomic_uint32_t, row_count> claims{};
   std::vector<std::thread> workers;
   for (size_t worker = 0; worker < 8; ++worker) {
@@ -139,6 +139,15 @@ void test_single_pass_stream() {
   for (const auto& count : claims) {
     assert(count.load(std::memory_order_relaxed) == 1);
   }
+
+  tools::breakdown_benchmark::PerformanceQueryStream cyclic(3, true);
+  assert(cyclic.try_claim() == 0);
+  assert(cyclic.try_claim() == 1);
+  assert(cyclic.try_claim() == 2);
+  assert(cyclic.try_claim() == 0);
+  assert(!cyclic.exhausted());
+  assert(cyclic.consumed() == 4);
+  assert(cyclic.capacity() == 3);
 }
 
 void test_recall_and_report_formatting() {

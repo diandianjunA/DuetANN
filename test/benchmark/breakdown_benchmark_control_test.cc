@@ -203,12 +203,19 @@ void test_write_rate_limited_args(const std::string& config_path) {
     "--write-threads", "16",
     "--target-write-qps", "500",
     "--performance-query-file", "queries.u8bin",
+    "--performance-query-mode", "cyclic",
     "--report-json", "report.json",
   });
   assert(args.mixed_mode == "write_rate_limited");
+  assert(args.performance_query_mode == "cyclic");
   assert(args.write_threads == 16);
   assert(args.target_query_qps == 0.0);
   assert(args.target_write_qps == 500.0);
+  auto invalid_mode = std::vector<std::string>{
+    "benchmark", "--service-config", config_path,
+    "--workload", "query", "--performance-query-file", "queries.u8bin",
+    "--performance-query-mode", "random", "--report-json", "report.json"};
+  assert(parse_rejected(std::move(invalid_mode)));
 }
 
 void test_removed_threshold_args_are_rejected(const std::string& config_path) {
@@ -340,6 +347,56 @@ void test_progress_deadline_records_zero_tail_and_excludes_drain() {
   const auto after_drain = reporter.samples();
   assert(after_drain.size() == at_deadline.size());
   assert(after_drain.back().completed_ops == 1);
+}
+
+void test_query_latency_windows() {
+  using namespace std::chrono_literals;
+  using tools::breakdown_benchmark::QueryLatencyRecorder;
+
+  const auto start = std::chrono::steady_clock::now();
+  QueryLatencyRecorder recorder(2, start, 10);
+  recorder.record(0, start + 100ms, start + 101ms);
+  recorder.record(1, start + 200ms, start + 203ms);
+  recorder.record(0, start + 5100ms, start + 5107ms);
+  recorder.record(1, start + 10100ms, start + 10200ms);
+  const auto windows = recorder.windows(5);
+  assert(windows.size() == 2);
+  assert(windows[0].samples == 2);
+  assert(windows[0].average_ns == 2'000'000.0);
+  assert(windows[0].p50_ns == 1'000'000);
+  assert(windows[0].p95_ns == 1'000'000);
+  assert(windows[0].p99_ns == 1'000'000);
+  assert(windows[1].samples == 1);
+  assert(windows[1].p99_ns == 7'000'000);
+
+  const auto fill_reservoir = [&](QueryLatencyRecorder& output) {
+    for (size_t sample = 0; sample < 1000; ++sample) {
+      output.record(
+        0, start + 100ms, start + 100ms +
+          std::chrono::microseconds(sample + 1));
+    }
+  };
+  QueryLatencyRecorder sampled_a(2, start, 10);
+  QueryLatencyRecorder sampled_b(2, start, 10);
+  fill_reservoir(sampled_a);
+  fill_reservoir(sampled_b);
+  const auto sampled_windows_a = sampled_a.windows(5);
+  const auto sampled_windows_b = sampled_b.windows(5);
+  assert(sampled_windows_a[0].samples == 1000);
+  assert(sampled_windows_a[0].average_ns == 500'500.0);
+  assert(sampled_windows_a[0].p50_ns > 350'000);
+  assert(sampled_windows_a[0].p50_ns < 650'000);
+  assert(sampled_windows_a[0].p99_ns > 800'000);
+  assert(sampled_windows_a[0].p50_ns == sampled_windows_b[0].p50_ns);
+  assert(sampled_windows_a[0].p95_ns == sampled_windows_b[0].p95_ns);
+  assert(sampled_windows_a[0].p99_ns == sampled_windows_b[0].p99_ns);
+  bool rejected_window = false;
+  try {
+    (void)sampled_a.windows(1);
+  } catch (const std::invalid_argument&) {
+    rejected_window = true;
+  }
+  assert(rejected_window);
 }
 
 void test_dynamic_delete_args(const std::string& config_path) {
@@ -477,6 +534,7 @@ int main() {
   test_strict_service_config();
   test_paced_dispatcher();
   test_progress_deadline_records_zero_tail_and_excludes_drain();
+  test_query_latency_windows();
   test_dynamic_delete_args(config_path.string());
   test_single_reader_args(config_path.string());
   test_dynamic_id_pool();

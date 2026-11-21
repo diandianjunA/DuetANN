@@ -27,9 +27,9 @@ struct VectorRows {
 
 VectorRows read_vector_rows(const std::string& path, bool decode_rows);
 
-class SinglePassRowStream {
+class PerformanceQueryStream {
 public:
-  explicit SinglePassRowStream(size_t row_count);
+  explicit PerformanceQueryStream(size_t row_count, bool cyclic = false);
 
   std::optional<size_t> try_claim();
   bool exhausted() const;
@@ -38,6 +38,7 @@ public:
 
 private:
   size_t row_count_{};
+  bool cyclic_{};
   std::atomic<size_t> next_row_{0};
   std::atomic<bool> exhausted_{false};
 };

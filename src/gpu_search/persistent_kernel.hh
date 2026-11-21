@@ -22,6 +22,9 @@
 #ifndef DVSTOR_PERSISTENT_LEGACY_MERGE
 #define DVSTOR_PERSISTENT_LEGACY_MERGE 0
 #endif
+#ifndef DVSTOR_PERSISTENT_COMPACT_LEGACY_SCRATCH
+#define DVSTOR_PERSISTENT_COMPACT_LEGACY_SCRATCH 0
+#endif
 #ifndef DVSTOR_PERSISTENT_MAX_BEAM
 #define DVSTOR_PERSISTENT_MAX_BEAM 256
 #endif
@@ -73,7 +76,12 @@ inline constexpr u32 kPersistentMaxGraphDegree = 128;
 inline constexpr u32 kPersistentMaxPrefetch = 32;
 inline constexpr u32 kPersistentFrontierRobCapacity = 32;
 inline constexpr u32 kPersistentGraphScratchSlots = kPersistentMaxPrefetch;
+#if DVSTOR_PERSISTENT_COMPACT_LEGACY_SCRATCH
+static_assert(DVSTOR_PERSISTENT_LEGACY_MERGE);
+inline constexpr u32 kPersistentStableRunScratch = kPersistentMaxBeam;
+#else
 inline constexpr u32 kPersistentStableRunScratch = 4 * kPersistentMaxBeam;
+#endif
 inline constexpr u32 kPersistentScoreChunk = 16;
 inline constexpr u32 kPersistentMaxMergeCandidates = 2048;
 // RemotePtr dedicates six bits to the physical shard.  GPU routing and RDMA
@@ -672,6 +680,35 @@ __host__ __device__
   return incarnation != 0 && incarnation <= kRemoteMaxIncarnation &&
          (state & kPersistentDynamicCodeArenaBusy) == 0 &&
          dynamic_code_tag_incarnation(state) == incarnation;
+}
+
+// A published newer incarnation proves that every older handle for this
+// physical slot is stale. Reject it locally instead of repeatedly fetching the
+// authoritative record just to observe the same incarnation mismatch.
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+  inline constexpr bool
+  dynamic_code_arena_stale_handle(u32 state, u32 incarnation) {
+  return incarnation != 0 && incarnation <= kRemoteMaxIncarnation &&
+         (state & kPersistentDynamicCodeArenaBusy) == 0 &&
+         dynamic_code_tag_incarnation(state) > incarnation;
+}
+
+// A stale request can return the complete newer occupant of its physical slot.
+// Its checksum-valid payload is useful even though it must not be scored for
+// the old handle. Older snapshots are never useful for cache publication.
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+  inline constexpr bool
+  dynamic_code_arena_snapshot_cacheable(u32 source_tag, u32 requested_incarnation,
+                                        bool checksum_valid) {
+  const u32 source_incarnation = dynamic_code_tag_incarnation(source_tag);
+  return checksum_valid && requested_incarnation != 0 &&
+         requested_incarnation <= kRemoteMaxIncarnation &&
+         source_incarnation >= requested_incarnation &&
+         source_incarnation <= kRemoteMaxIncarnation;
 }
 
 // A cache reader samples the state on both sides of the payload load.  Extent

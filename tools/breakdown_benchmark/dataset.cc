@@ -150,12 +150,16 @@ VectorRows read_vector_rows(const std::string& path, bool decode_rows) {
   return rows;
 }
 
-SinglePassRowStream::SinglePassRowStream(size_t row_count)
-    : row_count_(row_count) {}
+PerformanceQueryStream::PerformanceQueryStream(size_t row_count, bool cyclic)
+    : row_count_(row_count), cyclic_(cyclic) {}
 
-std::optional<size_t> SinglePassRowStream::try_claim() {
-  if (exhausted_.load(std::memory_order_acquire)) return std::nullopt;
+std::optional<size_t> PerformanceQueryStream::try_claim() {
+  if (row_count_ == 0 ||
+      (!cyclic_ && exhausted_.load(std::memory_order_acquire))) {
+    return std::nullopt;
+  }
   const size_t row = next_row_.fetch_add(1, std::memory_order_relaxed);
+  if (cyclic_) return row % row_count_;
   if (row >= row_count_) {
     exhausted_.store(true, std::memory_order_release);
     return std::nullopt;
@@ -163,15 +167,16 @@ std::optional<size_t> SinglePassRowStream::try_claim() {
   return row;
 }
 
-bool SinglePassRowStream::exhausted() const {
-  return exhausted_.load(std::memory_order_acquire);
+bool PerformanceQueryStream::exhausted() const {
+  return !cyclic_ && exhausted_.load(std::memory_order_acquire);
 }
 
-size_t SinglePassRowStream::consumed() const {
-  return std::min(next_row_.load(std::memory_order_relaxed), row_count_);
+size_t PerformanceQueryStream::consumed() const {
+  const size_t claimed = next_row_.load(std::memory_order_relaxed);
+  return cyclic_ ? claimed : std::min(claimed, row_count_);
 }
 
-size_t SinglePassRowStream::capacity() const {
+size_t PerformanceQueryStream::capacity() const {
   return row_count_;
 }
 

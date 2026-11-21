@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -22,6 +23,40 @@ struct ProgressSample {
   double total_ops_per_sec{};
   double query_ops_per_sec{};
   double write_ops_per_sec{};
+};
+
+struct QueryLatencyWindow {
+  size_t samples{};
+  double average_ns{};
+  uint64_t p50_ns{};
+  uint64_t p95_ns{};
+  uint64_t p99_ns{};
+};
+
+class QueryLatencyRecorder {
+public:
+  QueryLatencyRecorder(size_t worker_count,
+                       std::chrono::steady_clock::time_point phase_start,
+                       size_t measurement_seconds);
+
+  void record(size_t worker,
+              std::chrono::steady_clock::time_point started_at,
+              std::chrono::steady_clock::time_point finished_at);
+  std::vector<QueryLatencyWindow> windows(size_t window_seconds) const;
+
+private:
+  static constexpr size_t window_seconds_ = 5;
+  static constexpr size_t worker_reservoir_capacity_ = 64;
+
+  struct WindowSamples {
+    size_t count{};
+    uint64_t total_latency_ns{};
+    std::array<uint64_t, worker_reservoir_capacity_> reservoir{};
+  };
+
+  std::chrono::steady_clock::time_point phase_start_;
+  size_t measurement_seconds_;
+  std::vector<std::vector<WindowSamples>> samples_;
 };
 
 bool can_start_timed_operation(std::chrono::steady_clock::time_point deadline,

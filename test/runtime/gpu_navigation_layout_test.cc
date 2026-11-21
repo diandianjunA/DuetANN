@@ -52,6 +52,29 @@ void test_dynamic_pq_arena_mapping_and_incarnation_order() {
     tag, gpu_search::kPersistentDynamicCodeArenaBusy | tag, incarnation));
   assert(!gpu_search::dynamic_code_arena_read_stable(
     tag, gpu_search::make_dynamic_code_tag(incarnation + 1, 1), incarnation));
+  assert(gpu_search::dynamic_code_arena_stale_handle(
+    gpu_search::make_dynamic_code_tag(incarnation + 1, 1), incarnation));
+  assert(!gpu_search::dynamic_code_arena_stale_handle(tag, incarnation));
+  assert(!gpu_search::dynamic_code_arena_stale_handle(
+    gpu_search::make_dynamic_code_tag(incarnation - 1, 1), incarnation));
+  assert(!gpu_search::dynamic_code_arena_stale_handle(
+    gpu_search::kPersistentDynamicCodeArenaBusy |
+      gpu_search::make_dynamic_code_tag(incarnation + 1, 1),
+    incarnation));
+  assert(!gpu_search::dynamic_code_arena_stale_handle(0, incarnation));
+  assert(!gpu_search::dynamic_code_arena_stale_handle(
+    gpu_search::make_dynamic_code_tag(1, 1), 0));
+  assert(gpu_search::dynamic_code_arena_snapshot_cacheable(tag, incarnation,
+                                                            true));
+  assert(gpu_search::dynamic_code_arena_snapshot_cacheable(
+    gpu_search::make_dynamic_code_tag(incarnation + 1, 1), incarnation, true));
+  assert(!gpu_search::dynamic_code_arena_snapshot_cacheable(
+    gpu_search::make_dynamic_code_tag(incarnation + 1, 1), incarnation, false));
+  assert(!gpu_search::dynamic_code_arena_snapshot_cacheable(
+    gpu_search::make_dynamic_code_tag(incarnation - 1, 1), incarnation, true));
+  assert(!gpu_search::dynamic_code_arena_snapshot_cacheable(tag, 0, true));
+  assert(!gpu_search::dynamic_code_arena_snapshot_cacheable(0, incarnation,
+                                                             true));
   assert(gpu_search::dynamic_code_tag_extent_class(0xff000000u | incarnation) ==
          gpu_search::kPersistentDynamicCodeArenaUnknownExtent);
   assert(gpu_search::dynamic_code_arena_bootstrap_extent(tag, 1) == 7);

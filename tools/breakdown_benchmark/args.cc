@@ -320,6 +320,8 @@ Args parse_args(int argc, char** argv) {
         throw std::runtime_error("--performance-query-file was specified more than once");
       }
       args.performance_query_file = require_value("--performance-query-file");
+    } else if (flag == "--performance-query-mode") {
+      args.performance_query_mode = require_value("--performance-query-mode");
     } else if (flag == "--query-file") {
       if (!args.recall_query_file.empty()) {
         throw std::runtime_error("--query-file and --recall-query-file cannot both be specified");
@@ -395,6 +397,11 @@ Args parse_args(int argc, char** argv) {
   if (args.workload != "query" && args.workload != "insert" && args.workload != "both" &&
       args.workload != "mixed") {
     throw std::runtime_error("--workload must be query, insert, both, or mixed");
+  }
+  if (args.performance_query_mode != "single_pass" &&
+      args.performance_query_mode != "cyclic") {
+    throw std::runtime_error(
+      "--performance-query-mode must be single_pass or cyclic");
   }
   if (args.client_threads == 0) {
     throw std::runtime_error("--client-threads must be > 0");

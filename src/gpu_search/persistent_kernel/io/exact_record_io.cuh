@@ -414,6 +414,11 @@ __device__ bool approximate_handles_batch(
         distances[index] = FLT_MAX;
         atomicAdd(&call_incarnation_rejects, 1u);
       }
+      if (dynamic_code_arena_stale_handle(observed,
+                                          remote_incarnation(handle))) {
+        atomicAdd(&call_incarnation_rejects, 1u);
+        continue;
+      }
     }
     // The merge frontier can contain the same tagged handle through multiple
     // graph parents.  Deduplicate only inside this finite scoring call: one
@@ -459,6 +464,9 @@ __device__ bool approximate_handles_batch(
       }
       if (total_cache_hits != nullptr) {
         *total_cache_hits += call_cache_hits;
+      }
+      if (total_incarnation_rejects != nullptr) {
+        *total_incarnation_rejects += call_incarnation_rejects;
       }
       if (total_lookup_probe_exhaustions != nullptr) {
         *total_lookup_probe_exhaustions += call_lookup_probe_exhaustions;
@@ -520,10 +528,14 @@ __device__ bool approximate_handles_batch(
     const u32 dynamic_tag = vamana::dynamic_navigation_code::load_u32_le(code);
     const u8* payload = code + sizeof(u32);
     const u8* checksum = payload + pq_code_bytes;
+    const bool checksum_valid = vamana::dynamic_navigation_code::validate(
+      dynamic_tag, payload, pq_code_bytes, checksum);
+    // The transport request is complete, so reuse its IOVA slot to carry the
+    // validation result into the single-threaded cache publication pass.
+    request_local_iova_offsets[index] = checksum_valid ? 1u : 0u;
     if (dynamic_code_tag_incarnation(dynamic_tag) ==
           remote_incarnation(handles[index]) &&
-        vamana::dynamic_navigation_code::validate(
-          dynamic_tag, payload, pq_code_bytes, checksum)) {
+        checksum_valid) {
       distances[index] = approximate_entry<PqSubquantizers>(
         params, query_lut, payload);
     } else {
@@ -539,8 +551,7 @@ __device__ bool approximate_handles_batch(
       params.dynamic_code_arena_records != nullptr) {
     for (u32 index = 0; index < count; ++index) {
       const u32 shard = request_shards[index];
-      if (shard >= params.num_shards || shard_status[shard] != 0 ||
-          distances[index] == FLT_MAX) {
+      if (shard >= params.num_shards || shard_status[shard] != 0) {
         continue;
       }
       const u64 handle = handles[index];
@@ -549,10 +560,13 @@ __device__ bool approximate_handles_batch(
         (request_base + index) * params.dynamic_code_record_stride;
       const u32 source_tag =
         vamana::dynamic_navigation_code::load_u32_le(source);
-      const u32 desired_incarnation = remote_incarnation(handle);
-      if (dynamic_code_tag_incarnation(source_tag) != desired_incarnation) {
+      const u32 requested_incarnation = remote_incarnation(handle);
+      if (!dynamic_code_arena_snapshot_cacheable(
+            source_tag, requested_incarnation,
+            request_local_iova_offsets[index] != 0)) {
         continue;
       }
+      const u32 desired_incarnation = dynamic_code_tag_incarnation(source_tag);
       const u64 node_offset = remote_byte_offset(handle);
       const DeviceShardRegion& region = params.shards[shard];
       u64 arena_slot = 0;

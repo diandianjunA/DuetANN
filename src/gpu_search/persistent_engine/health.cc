@@ -33,13 +33,7 @@ void PersistentSearchEngine::Impl::release_query_slot(u32 slot) {
   // observes this phase before attempting free -> preparing.
   state.phase.store(static_cast<u32>(QuerySlotPhase::free),
                     std::memory_order_release);
-  if (!free_slots->try_push(slot)) {
-    // A full free-slot queue means the same slot was released twice. Continuing
-    // would permit concurrent reuse of query/result scratch and corrupt recall.
-    std::cerr << "[gpu-search] fatal duplicate bounded query-slot release: "
-              << slot << '\n';
-    std::terminate();
-  }
+  free_slots->push_wait(slot);
 }
 
 void PersistentSearchEngine::Impl::mark_unhealthy(const std::string& message) {

@@ -28,6 +28,7 @@ struct Args {
   double target_write_qps{};
   std::string recall_query_file;
   std::string performance_query_file;
+  std::string performance_query_mode{"single_pass"};
   std::string insert_file;
   std::string groundtruth_file;
   size_t recall_queries{1000};

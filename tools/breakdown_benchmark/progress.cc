@@ -10,6 +10,107 @@
 
 namespace tools::breakdown_benchmark {
 
+namespace {
+
+uint64_t query_latency_reservoir_hash(uint64_t value) {
+  value += 0x9e3779b97f4a7c15ULL;
+  value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+  return value ^ (value >> 31);
+}
+
+}  // namespace
+
+QueryLatencyRecorder::QueryLatencyRecorder(
+    size_t worker_count, std::chrono::steady_clock::time_point phase_start,
+    size_t measurement_seconds)
+    : phase_start_(phase_start),
+      measurement_seconds_(measurement_seconds),
+      samples_(
+        worker_count,
+        std::vector<WindowSamples>(
+          (measurement_seconds + window_seconds_ - 1) / window_seconds_)) {}
+
+void QueryLatencyRecorder::record(
+    size_t worker, std::chrono::steady_clock::time_point started_at,
+    std::chrono::steady_clock::time_point finished_at) {
+  if (worker >= samples_.size() || finished_at < started_at) {
+    throw std::invalid_argument("invalid query latency sample");
+  }
+  const double elapsed =
+    std::chrono::duration<double>(finished_at - phase_start_).count();
+  if (elapsed < 0.0 || elapsed >= static_cast<double>(measurement_seconds_)) {
+    return;
+  }
+  const size_t index = static_cast<size_t>(elapsed) / window_seconds_;
+  auto& window = samples_[worker][index];
+  const uint64_t latency_ns =
+    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+      finished_at - started_at).count());
+  const size_t ordinal = ++window.count;
+  window.total_latency_ns += latency_ns;
+  if (ordinal <= worker_reservoir_capacity_) {
+    window.reservoir[ordinal - 1] = latency_ns;
+    return;
+  }
+  const size_t replacement = static_cast<size_t>(
+    query_latency_reservoir_hash(ordinal) % ordinal);
+  if (replacement < worker_reservoir_capacity_) {
+    window.reservoir[replacement] = latency_ns;
+  }
+}
+
+std::vector<QueryLatencyWindow> QueryLatencyRecorder::windows(
+    size_t window_seconds) const {
+  if (window_seconds != window_seconds_) {
+    throw std::invalid_argument("query latency windows must use five seconds");
+  }
+  struct WeightedLatency {
+    uint64_t latency_ns{};
+    double weight{};
+  };
+  std::vector<QueryLatencyWindow> result(
+    samples_.empty() ? 0 : samples_.front().size());
+  for (size_t index = 0; index < result.size(); ++index) {
+    std::vector<WeightedLatency> weighted;
+    weighted.reserve(samples_.size() * worker_reservoir_capacity_);
+    auto& output = result[index];
+    for (const auto& worker_samples : samples_) {
+      const auto& input = worker_samples[index];
+      output.samples += input.count;
+      output.average_ns += input.total_latency_ns;
+      const size_t retained = std::min(
+        input.count, worker_reservoir_capacity_);
+      if (retained == 0) continue;
+      const double weight = static_cast<double>(input.count) / retained;
+      for (size_t sample = 0; sample < retained; ++sample) {
+        weighted.push_back({input.reservoir[sample], weight});
+      }
+    }
+    if (output.samples == 0) continue;
+    output.average_ns /= output.samples;
+    std::sort(
+      weighted.begin(), weighted.end(),
+      [](const WeightedLatency& lhs, const WeightedLatency& rhs) {
+        return lhs.latency_ns < rhs.latency_ns;
+      });
+    const double total_weight = output.samples;
+    auto percentile = [&](double quantile) {
+      const double target = quantile * (total_weight - 1.0);
+      double cumulative = 0.0;
+      for (const auto& sample : weighted) {
+        cumulative += sample.weight;
+        if (target < cumulative) return sample.latency_ns;
+      }
+      return weighted.back().latency_ns;
+    };
+    output.p50_ns = percentile(0.50);
+    output.p95_ns = percentile(0.95);
+    output.p99_ns = percentile(0.99);
+  }
+  return result;
+}
+
 bool can_start_timed_operation(const std::chrono::steady_clock::time_point deadline,
                                const std::chrono::nanoseconds avg_duration,
                                size_t completed_ops) {

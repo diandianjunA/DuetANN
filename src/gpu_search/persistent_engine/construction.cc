@@ -154,7 +154,12 @@ void PersistentSearchEngine::Impl::initialize(
     throw std::invalid_argument(
       "GPU navigation beam/exact/degree limit exceeded");
   }
-#if !DVSTOR_PERSISTENT_LEGACY_MERGE
+#if DVSTOR_PERSISTENT_COMPACT_LEGACY_SCRATCH
+  if (config.gpu_query_beam_merge_policy != "legacy") {
+    throw std::invalid_argument(
+      "compact legacy scratch requires the legacy GPU beam merge policy");
+  }
+#elif !DVSTOR_PERSISTENT_LEGACY_MERGE
   if (config.gpu_query_beam_merge_policy != "stable-run") {
     throw std::invalid_argument(
       "GPU beam merge policy \"" + config.gpu_query_beam_merge_policy +

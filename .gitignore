@@ -15,6 +15,7 @@ CMakeUserPresets.json
 doc/
 experiment/
 results/
+result-data/
 
 # Local experiment output. Existing checked-in reference results stay tracked.
 /experiment/**/results/
